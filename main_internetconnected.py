@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 import requests
@@ -16,13 +17,16 @@ from audio.tts import KokoroTTS
 from audio.vad import VADConfig, VADListener
 from llm.ollama import OllamaClient
 
+# Import all tools from the centralized tools module
+from tools import TOOLS, execute_tool_call
+
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Configuration from environment variables
 FIRECRAWL_URL = os.getenv("FIRECRAWL_URL", "http://localhost:3002")
-FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")  # Optional for self-hosted
+OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")  # Tool-capable model required
 
@@ -96,190 +100,6 @@ def _detect_whisper_device() -> str:
     except Exception:
         pass
     return "cpu"
-
-
-# ============================================================================
-# Firecrawl Tool Functions
-# ============================================================================
-
-def search_web(query: str) -> str:
-    """Search the web using Firecrawl's search API.
-    
-    Args:
-        query: The search query string
-        
-    Returns:
-        A summary of search results as a string
-    """
-    try:
-        print(f"🔍 Searching web for: {query}")
-        
-        headers = {}
-        if FIRECRAWL_API_KEY:
-            headers["Authorization"] = f"Bearer {FIRECRAWL_API_KEY}"
-        
-        response = requests.post(
-            f"{FIRECRAWL_URL}/v2/search",
-            json={"query": query},
-            headers=headers,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Firecrawl v2 returns: {"data": {"web": [...]}}
-            if "data" in data and isinstance(data["data"], dict) and "web" in data["data"]:
-                results = data["data"]["web"]
-            elif "data" in data and isinstance(data["data"], list):
-                results = data["data"]
-            elif "results" in data:
-                results = data["results"]
-            else:
-                results = data if isinstance(data, list) else []
-            
-            # Ensure results is a list
-            if not isinstance(results, list):
-                return f"Unexpected response format. Got {type(results).__name__}, expected list"
-            
-            if not results:
-                return "No search results found."
-            
-            # Format results
-            summary = f"Found {len(results)} results:\n\n"
-            try:
-                # Safely iterate with limit
-                for i, result in enumerate(results[:5] if len(results) > 5 else results, 1):
-                    if isinstance(result, dict):
-                        title = result.get("title", result.get("name", "Untitled"))
-                        url = result.get("url", result.get("link", ""))
-                        snippet = result.get("description", result.get("snippet", result.get("content", "")))
-                        
-                        # Safely truncate snippet
-                        if snippet and len(snippet) > 200:
-                            snippet = snippet[:200] + "..."
-                        
-                        summary += f"{i}. {title}\n   URL: {url}\n   {snippet}\n\n"
-                    else:
-                        summary += f"{i}. {str(result)}\n\n"
-            except Exception as e:
-                return f"Error formatting results: {str(e)}"
-            
-            return summary
-        else:
-            return f"Search failed with status code: {response.status_code}"
-            
-    except Exception as e:
-        print(f"❌ Search error: {e}")
-        return f"Search error: {str(e)}"
-
-
-def scrape_webpage(url: str) -> str:
-    """Scrape a webpage using Firecrawl's scrape API.
-    
-    Args:
-        url: The URL to scrape
-        
-    Returns:
-        The scraped content as a string
-    """
-    try:
-        print(f"🌐 Scraping webpage: {url}")
-        
-        headers = {"Content-Type": "application/json"}
-        if FIRECRAWL_API_KEY:
-            headers["Authorization"] = f"Bearer {FIRECRAWL_API_KEY}"
-        
-        response = requests.post(
-            f"{FIRECRAWL_URL}/v2/scrape",
-            json={
-                "url": url,
-                "formats": ["markdown"]  # Get clean markdown content
-            },
-            headers=headers,
-            timeout=60
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            content = data.get("data", {}).get("markdown", "")
-            
-            if not content:
-                return "No content found on the page."
-            
-            # Limit content length for LLM context
-            max_length = 2000
-            if len(content) > max_length:
-                content = content[:max_length] + "...\n[Content truncated]"
-            
-            return f"Content from {url}:\n\n{content}"
-        else:
-            return f"Scraping failed with status code: {response.status_code}"
-            
-    except Exception as e:
-        print(f"❌ Scraping error: {e}")
-        return f"Scraping error: {str(e)}"
-
-
-# ============================================================================
-# Tool Definitions for Ollama
-# ============================================================================
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Search the web for information on a topic. Use this when you need current information, facts, news, or anything you don't have in your training data.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query (e.g., 'latest AI news', 'weather in Tokyo', 'Python tutorials')"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "scrape_webpage",
-            "description": "Scrape and read the content of a specific webpage. Use this when you need to read detailed information from a specific URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The full URL of the webpage to scrape (e.g., 'https://example.com/article')"
-                    }
-                },
-                "required": ["url"]
-            }
-        }
-    }
-]
-
-
-# Map function names to actual functions
-TOOL_FUNCTIONS = {
-    "search_web": search_web,
-    "scrape_webpage": scrape_webpage
-}
-
-
-def execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
-    """Execute a tool function and return its result."""
-    if tool_name in TOOL_FUNCTIONS:
-        try:
-            result = TOOL_FUNCTIONS[tool_name](**arguments)
-            return result
-        except Exception as e:
-            return f"Error executing {tool_name}: {str(e)}"
-    else:
-        return f"Unknown tool: {tool_name}"
 
 
 # ============================================================================
@@ -403,6 +223,7 @@ def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None
     print(f"-> Ollama URL: {OLLAMA_URL}")
     print(f"-> Ollama Model: {OLLAMA_MODEL}")
     print(f"-> Firecrawl URL: {FIRECRAWL_URL}")
+    print(f"-> Weather API: {'✓ Configured' if OPENWEATHERMAP_API_KEY else '✗ Not configured'}")
     
     # Check Firecrawl connectivity (using root endpoint since /health doesn't exist)
     try:
@@ -438,11 +259,19 @@ def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None
     stt_model = FasterWhisperSTT(model_size_or_path="tiny.en", device=stt_device, compute_type="int8")
 
     # Use a tool-capable model (configured via environment variable)
+    # Include current date/time so the model knows what "now" is
+    current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    system_prompt = f"""You are a helpful AI assistant with access to web search and webpage scraping tools. 
+
+IMPORTANT: Today's date is {current_datetime}. When searching for current or recent information, use the current year (2025) in your search queries, not outdated years like 2023 or 2024.
+
+Use these tools when you need current information or to look up specific details online. Always be concise in your responses."""
+    
     ollama_client = OllamaClientWithTools(
         url=OLLAMA_URL,
         model=OLLAMA_MODEL,
         stream=False,  # Disable streaming for tool support
-        system_prompt="You are a helpful AI assistant with access to web search and webpage scraping tools. Use these tools when you need current information or to look up specific details online. Always be concise in your responses.",
+        system_prompt=system_prompt,
     )
 
     tts_model = KokoroTTS(voice="af_bella", speed=1.0)
@@ -515,7 +344,9 @@ def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None
 
     print("-> Voice assistant ready! Listening for speech...")
     print("-> 🌐 Internet access enabled via Firecrawl tools")
-    print("-> Ask me to search for information or scrape webpages!")
+    if OPENWEATHERMAP_API_KEY:
+        print("-> 🌤️  Weather information enabled via OpenWeatherMap")
+    print("-> Ask me to search for information, check weather, or scrape webpages!")
     if enable_memory_monitor:
         print(f"-> Memory monitoring enabled (updates every {monitor_interval}s)")
     print("-> Press Ctrl+C to stop.")
