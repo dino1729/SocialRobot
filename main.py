@@ -1,15 +1,85 @@
-"""Entrypoint for the robot face and dialogue loop."""
+"""Entrypoint for the basic voice assistant."""
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from typing import Optional
+
+from dotenv import load_dotenv
 
 from audio.stt import FasterWhisperSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADConfig, VADListener
-from face_animation.face import FaceAnimator, FaceSettings
 from llm.ollama import OllamaClient
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configuration from environment variables
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:270m")
+
+
+def _get_memory_stats() -> dict[str, float]:
+    """Get system memory statistics (lightweight, no external dependencies)."""
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+        
+        mem_total = mem_available = mem_free = 0
+        for line in meminfo.split('\n'):
+            if line.startswith('MemTotal:'):
+                mem_total = int(line.split()[1]) / 1024  # Convert to MB
+            elif line.startswith('MemAvailable:'):
+                mem_available = int(line.split()[1]) / 1024
+            elif line.startswith('MemFree:'):
+                mem_free = int(line.split()[1]) / 1024
+        
+        mem_used = mem_total - mem_available
+        mem_percent = (mem_used / mem_total * 100) if mem_total > 0 else 0
+        
+        return {
+            'total': mem_total,
+            'used': mem_used,
+            'available': mem_available,
+            'percent': mem_percent
+        }
+    except Exception:
+        return {'total': 0, 'used': 0, 'available': 0, 'percent': 0}
+
+
+def _get_process_memory() -> float:
+    """Get current process memory usage in MB."""
+    try:
+        pid = os.getpid()
+        with open(f'/proc/{pid}/status', 'r') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024  # Convert to MB
+    except Exception:
+        pass
+    return 0.0
+
+
+def _format_memory_stats(stats: dict[str, float], process_mem: float) -> str:
+    """Format memory statistics for display."""
+    return (
+        f"💾 RAM: {stats['used']:.0f}/{stats['total']:.0f}MB "
+        f"({stats['percent']:.1f}%) | "
+        f"Process: {process_mem:.0f}MB"
+    )
+
+
+def _memory_monitor(stop_event: threading.Event, interval: int = 60) -> None:
+    """Background thread to monitor and display memory usage."""
+    while not stop_event.is_set():
+        stats = _get_memory_stats()
+        process_mem = _get_process_memory()
+        print(f"\n{_format_memory_stats(stats, process_mem)}")
+        stop_event.wait(interval)  # Sleep but can be interrupted
 
 
 def _detect_whisper_device() -> str:
@@ -24,21 +94,42 @@ def _detect_whisper_device() -> str:
     return "cpu"
 
 
-def main() -> None:
-    """Initializes all components and starts the main interaction loop."""
-    face_settings = FaceSettings(window_size=(1920, 1080), rotation_degrees=180)
-    face_animator = FaceAnimator(settings=face_settings)
-    face_thread = threading.Thread(target=face_animator.run, daemon=True)
-    face_thread.start()
-
+def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None:
+    """Initializes all components and starts the main interaction loop.
+    
+    Args:
+        enable_memory_monitor: Whether to show periodic memory usage stats (default: True)
+        monitor_interval: Seconds between memory stat updates (default: 60)
+    """
+    print("-> Initializing basic voice assistant...")
+    print(f"-> Ollama URL: {OLLAMA_URL}")
+    print(f"-> Ollama Model: {OLLAMA_MODEL}")
+    
+    # Display initial memory stats
+    if enable_memory_monitor:
+        stats = _get_memory_stats()
+        process_mem = _get_process_memory()
+        print(f"-> Initial {_format_memory_stats(stats, process_mem)}")
+    
+    # Start background memory monitor if enabled
+    memory_stop_event = threading.Event()
+    memory_thread = None
+    if enable_memory_monitor:
+        memory_thread = threading.Thread(
+            target=_memory_monitor,
+            args=(memory_stop_event, monitor_interval),
+            daemon=True
+        )
+        memory_thread.start()
+    
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2)
 
     stt_device = _detect_whisper_device()
     stt_model = FasterWhisperSTT(model_size_or_path="tiny.en", device=stt_device, compute_type="int8")
 
     ollama_client = OllamaClient(
-        url="http://localhost:11434/api/chat",
-        model="gemma3:270m",
+        url=OLLAMA_URL,
+        model=OLLAMA_MODEL,
         stream=True,
         system_prompt="You are a cheerful robotic companion speaking concisely.",
     )
@@ -65,7 +156,6 @@ def main() -> None:
         print("-> User said:", recognized_text)
 
         if not recognized_text.strip():
-            face_animator.update_amplitude(0.0)
             vad_listener.enable_vad()
             return
 
@@ -79,13 +169,13 @@ def main() -> None:
                 or normalized_bot in normalized_user
             ):
                 print("-> Ignoring self-echo from recent response.")
-                face_animator.update_amplitude(0.0)
                 vad_listener.enable_vad()
                 return
 
         llm_response = ollama_client.query(recognized_text)
+        print("-> Bot response:", llm_response)
+        
         if not llm_response.strip():
-            face_animator.update_amplitude(0.0)
             vad_listener.enable_vad()
             return
 
@@ -93,30 +183,57 @@ def main() -> None:
             audio_data = tts_model.synthesize(llm_response)
         except Exception as exc:  # pragma: no cover - defensive logging only
             print("TTS error:", exc)
-            face_animator.update_amplitude(0.0)
             vad_listener.enable_vad()
             return
 
         last_bot_response = llm_response
 
-        def amplitude_callback(level: float) -> None:
-            face_animator.update_amplitude(level)
-
-        tts_model.play_audio_with_amplitude(audio_data, amplitude_callback)
-        face_animator.update_amplitude(0.0)
+        # Play audio without amplitude callback (no face animation)
+        tts_model.play_audio_with_amplitude(audio_data, amplitude_callback=None)
+        
+        # Display memory stats after interaction
+        if enable_memory_monitor:
+            stats = _get_memory_stats()
+            process_mem = _get_process_memory()
+            print(f"-> {_format_memory_stats(stats, process_mem)}")
+        
         vad_listener.enable_vad()
 
     vad_listener = VADListener(config=vad_config, device_index=None, on_speech_callback=on_speech_detected)
 
-    print("-> Starting the VAD listener...")
+    print("-> Voice assistant ready! Listening for speech...")
+    if enable_memory_monitor:
+        print(f"-> Memory monitoring enabled (updates every {monitor_interval}s)")
+    print("-> Press Ctrl+C to stop.")
+    
     try:
         vad_listener.start()
     except KeyboardInterrupt:
-        print("Shutting down...")
+        print("\n-> Shutting down...")
     finally:
         vad_listener.stop()
-        face_animator.stop()
+        
+        # Stop memory monitor thread
+        if enable_memory_monitor:
+            memory_stop_event.set()
+            if memory_thread and memory_thread.is_alive():
+                memory_thread.join(timeout=1)
+        
+        # Display final memory stats
+        if enable_memory_monitor:
+            stats = _get_memory_stats()
+            process_mem = _get_process_memory()
+            print(f"-> Final {_format_memory_stats(stats, process_mem)}")
+        
+        print("-> Goodbye!")
 
 
 if __name__ == "__main__":
+    # Default: memory monitoring enabled with 60s interval
     main()
+    
+    # To disable memory monitoring, use:
+    # main(enable_memory_monitor=False)
+    
+    # To change update interval (e.g., every 30 seconds):
+    # main(enable_memory_monitor=True, monitor_interval=30)

@@ -1,13 +1,20 @@
-# Social Robot Build & Setup Guide
+# Social Robot - Basic Voice Assistant (Headless Mode)
 
 ![Hero shot placeholder](images/hero-shot-placeholder.jpg)
 
-## Overview
-The Social Robot project combines a 3D-printed chassis, off-the-shelf electronics, and an interactive software stack that renders a projected face while chatting via a local language model. This guide walks you through sourcing the hardware, printing parts, building the robot, and configuring the Jetson-powered software stack.
+> **⚠️ IMPORTANT NOTE:** This is a **simplified, headless version** of the Social Robot that removes all face animation and visual display components. Perfect for running on a Jetson Orin Nano (8GB) in headless mode with minimal memory footprint.
 
-- **Mechanical build**: 33 support-free 3D printed components, mirrors, and fasteners form the body and projection system.
-- **Compute & audio**: An NVIDIA Jetson Orin Nano Super Developer Kit drives the voice, speech recognition, and projection experience.
-- **Software**: WebRTC-based voice activity detection, Faster-Whisper speech recognition, Kokoro-ONNX text-to-speech, and a pygame-driven face animation loop communicating with an Ollama-hosted LLM.
+## Overview
+This basic voice assistant version provides a conversational AI experience without the visual face animation system. The software stack includes:
+
+- **Compute & audio**: An NVIDIA Jetson Orin Nano drives the voice interaction pipeline.
+- **Software**: WebRTC-based voice activity detection, Faster-Whisper speech recognition, Kokoro-ONNX text-to-speech, and an Ollama-hosted LLM (gemma3:270m - the smallest model available).
+- **No visual display required**: Operates entirely in headless mode, perfect for SSH access or minimal setups.
+
+### What's been removed from the original project:
+- **Face animation system** (pygame, FaceAnimator, visual assets)
+- **Display requirements** (no need for HDMI output, projector, mirrors, or screen)
+- **Threading for face rendering** (simplified single-thread operation with VAD callbacks)
 
 > [!IMPORTANT]
 > **Availability & Kits** > Social Robot is free to make and print for personal use. For convenience, a limited number of pre-printed kits (including all parts **except** the Jetson) are available here: [ominousindustries.com](https://ominousindustries.com/products/ai-social-robot-kit-compatible-with-nvidia-jetson-orin-nano-super-jetson-not-included).
@@ -22,18 +29,14 @@ The Social Robot project combines a 3D-printed chassis, off-the-shelf electronic
 ## Software Setup
 
 ### 1. OS Prerequisites (Jetson)
-Install system packages once per Jetson Orin Nano to support audio, SDL, and build tooling:
+Install system packages once per Jetson Orin Nano to support audio and build tooling:
 ```bash
 sudo apt update
 sudo apt install -y git curl python3-venv python3-dev build-essential \
-    libportaudio2 portaudio19-dev libasound-dev \
-    libsdl2-dev libsdl2-image-dev libpng-dev
+    libportaudio2 portaudio19-dev libasound-dev
 ```
 - `pyaudio` depends on PortAudio/ALSA headers and libraries.
-- `webrtcvad` and `pygame` require development headers on aarch64.
-- `pygame` uses SDL2 and libpng for rendering; add SDL mixer/TTF and image codecs if needed.
-
-If you plan to display over HDMI while logged in via SSH, start an X server on the Jetson desktop (`DISPLAY=:0` later).
+- `webrtcvad` requires development headers on aarch64.
 
 ### 2. Clone the Repository
 ```bash
@@ -49,8 +52,8 @@ python -m pip install -r requirements.txt
 ```
 The first run downloads the Faster-Whisper `tiny.en` model and Kokoro ONNX/voice files into `~/.cache/kokoro_onnx`.
 
-### 4. Provide Face Assets
-Place `face.png` and `mouth.png` (transparent PNGs sized for your display) in the repository root, or update `FaceSettings.face_image_path` and `mouth_image_path` in `main.py`. There are some default ones included here for both the Robot and non Robot use cases. 
+### 4. ~~Provide Face Assets~~ (Not needed for basic voice assistant)
+**Note:** The face animation system has been removed in this basic voice assistant version. The robot now operates in headless mode without visual display. 
 
 ### 5. Install & Prepare Ollama
 ```bash
@@ -75,10 +78,9 @@ PulseAudio settings reset on reboot unless persisted via configuration files.
 ### 7. Run the Application
 ```bash
 # inside the venv and repository root
-export DISPLAY=:0        # required when launching over SSH
 python main.py
 ```
-The face renderer runs in a dedicated thread, while the VAD loop waits for speech. Whisper falls back to CPU if CUDA is unavailable; otherwise, ctranslate2 leverages GPU acceleration.
+The voice assistant runs in headless mode. The VAD loop listens for speech, processes it through Whisper STT, generates responses using Ollama LLM (gemma3:270m - the lowest memory model), and speaks back using Kokoro TTS. Whisper falls back to CPU if CUDA is unavailable; otherwise, ctranslate2 leverages GPU acceleration.
 
 ## Bill of Materials
 
