@@ -2,3 +2,5 @@ venv
 .vscode
 __pycache__
 .env
+.python-version
+.venv
