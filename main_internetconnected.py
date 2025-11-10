@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import threading
@@ -100,6 +101,40 @@ def _detect_whisper_device() -> str:
     except Exception:
         pass
     return "cpu"
+
+
+def _is_jetson() -> bool:
+    """Detects if running on NVIDIA Jetson platform."""
+    try:
+        # Check for Jetson-specific hardware identifiers
+        with open("/proc/device-tree/model", "r") as f:
+            model = f.read().lower()
+            return "jetson" in model or "tegra" in model
+    except Exception:
+        pass
+    
+    # Fallback: check for Jetson-specific environment
+    return os.path.exists("/etc/nv_tegra_release")
+
+
+def _get_default_compute_type(device: str) -> str:
+    """Returns default compute type based on device and platform.
+    
+    Args:
+        device: Device type ('cuda' or 'cpu')
+    
+    Returns:
+        Default compute type ('int8', 'float16', or 'float32')
+    """
+    if device == "cpu":
+        return "int8"  # CPU always uses int8
+    
+    # For CUDA, check if running on Jetson
+    if _is_jetson():
+        return "int8"  # Jetson Orin Nano uses int8
+    
+    # For desktop GPUs (RTX 5090, etc.), use float16 for better compatibility
+    return "float16"
 
 
 # ============================================================================
@@ -212,12 +247,18 @@ class OllamaClientWithTools:
 # Main Function
 # ============================================================================
 
-def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None:
+def main(
+    enable_memory_monitor: bool = True,
+    monitor_interval: int = 60,
+    compute_type: Optional[str] = None,
+) -> None:
     """Initializes all components and starts the main interaction loop.
     
     Args:
         enable_memory_monitor: Whether to show periodic memory usage stats (default: True)
         monitor_interval: Seconds between memory stat updates (default: 60)
+        compute_type: Compute type for faster-whisper ('int8', 'float16', or 'float32').
+                     If None, auto-detects based on device and platform.
     """
     print("-> Initializing internet-connected voice assistant...")
     print(f"-> Ollama URL: {OLLAMA_URL}")
@@ -256,7 +297,19 @@ def main(enable_memory_monitor: bool = True, monitor_interval: int = 60) -> None
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2)
 
     stt_device = _detect_whisper_device()
-    stt_model = FasterWhisperSTT(model_size_or_path="tiny.en", device=stt_device, compute_type="int8")
+    
+    # Determine compute type: use provided value or auto-detect based on platform
+    if compute_type is None:
+        compute_type = _get_default_compute_type(stt_device)
+        print(f"-> Auto-detected compute type: {compute_type} (device: {stt_device})")
+    else:
+        # Validate compute type
+        valid_types = ["int8", "float16", "float32"]
+        if compute_type not in valid_types:
+            print(f"-> Warning: Invalid compute type '{compute_type}', using default")
+            compute_type = _get_default_compute_type(stt_device)
+    
+    stt_model = FasterWhisperSTT(model_size_or_path="tiny.en", device=stt_device, compute_type=compute_type)
 
     # Use a tool-capable model (configured via environment variable)
     # Include current date/time so the model knows what "now" is
@@ -374,12 +427,55 @@ Use these tools when you need current information or to look up specific details
 
 
 if __name__ == "__main__":
-    # Default: memory monitoring enabled with 60s interval
-    main()
+    parser = argparse.ArgumentParser(
+        description="Internet-connected voice assistant with tool support",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Use default settings (auto-detects compute type)
+  python main_internetconnected.py
+  
+  # Use int8 compute type (for Jetson Orin Nano)
+  python main_internetconnected.py --compute-type int8
+  
+  # Use float16 compute type (for desktop GPUs like RTX 5090)
+  python main_internetconnected.py --compute-type float16
+  
+  # Disable memory monitoring
+  python main_internetconnected.py --no-memory-monitor
+  
+  # Change memory monitor interval
+  python main_internetconnected.py --monitor-interval 30
+        """,
+    )
     
-    # To disable memory monitoring, use:
-    # main(enable_memory_monitor=False)
+    parser.add_argument(
+        "--compute-type",
+        type=str,
+        choices=["int8", "float16", "float32"],
+        default=None,
+        help="Compute type for faster-whisper. Options: int8 (Jetson), float16 (desktop GPUs), float32. "
+             "If not specified, auto-detects based on device and platform.",
+    )
     
-    # To change update interval (e.g., every 30 seconds):
-    # main(enable_memory_monitor=True, monitor_interval=30)
+    parser.add_argument(
+        "--no-memory-monitor",
+        action="store_true",
+        help="Disable memory usage monitoring",
+    )
+    
+    parser.add_argument(
+        "--monitor-interval",
+        type=int,
+        default=60,
+        help="Memory monitor update interval in seconds (default: 60)",
+    )
+    
+    args = parser.parse_args()
+    
+    main(
+        enable_memory_monitor=not args.no_memory_monitor,
+        monitor_interval=args.monitor_interval,
+        compute_type=args.compute_type,
+    )
 
