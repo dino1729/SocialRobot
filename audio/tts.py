@@ -29,18 +29,28 @@ class KokoroTTS:
         voice: str = "af_bella",
         speed: float = 1.0,
         model_dir: Optional[Path | str] = None,
+        use_gpu: bool = False,
     ) -> None:
         self.voice = voice
         self.speed = speed
         self.sample_rate = SAMPLE_RATE
+        self.use_gpu = use_gpu
         self._model_dir = Path(model_dir) if model_dir else Path.home() / ".cache" / "kokoro_onnx"
         self._model_dir.mkdir(parents=True, exist_ok=True)
         self._model_path = self._model_dir / MODEL_FILENAME
         self._voices_path = self._model_dir / VOICES_FILENAME
         self._ensure_model_files()
+        
+        # Configure execution providers for ONNX runtime globally
+        if self.use_gpu:
+            self._configure_gpu_providers()
+        
         self._engine = Kokoro(str(self._model_path), str(self._voices_path))
         self._validate_voice()
-        print("-> Using Kokoro-ONNX for speech synthesis.")
+        
+        # Report which device is being used
+        actual_provider = self._get_actual_provider()
+        print(f"-> Using Kokoro-ONNX for speech synthesis on {actual_provider}.")
 
     def _ensure_model_files(self) -> None:
         for url, path, checksum in (
@@ -77,6 +87,40 @@ class KokoroTTS:
 
         tmp_path.replace(destination)
 
+    def _configure_gpu_providers(self) -> None:
+        """Configure ONNX runtime to use GPU providers."""
+        try:
+            import onnxruntime as ort
+            available = ort.get_available_providers()
+            
+            # Check which GPU providers are available
+            if 'CUDAExecutionProvider' in available:
+                print("-> GPU (CUDA) provider available for TTS")
+            elif 'TensorrtExecutionProvider' in available:
+                print("-> GPU (TensorRT) provider available for TTS")
+            else:
+                print("-> Warning: GPU requested but no GPU provider available, falling back to CPU")
+        except ImportError:
+            print("-> Warning: onnxruntime not available, cannot configure GPU")
+    
+    def _get_actual_provider(self) -> str:
+        """Detect which execution provider is actually being used."""
+        try:
+            import onnxruntime as ort
+            available = ort.get_available_providers()
+            
+            if self.use_gpu:
+                if 'CUDAExecutionProvider' in available:
+                    return "GPU (CUDA)"
+                elif 'TensorrtExecutionProvider' in available:
+                    return "GPU (TensorRT)"
+                else:
+                    return "CPU (GPU unavailable)"
+            else:
+                return "CPU"
+        except Exception:
+            return "CPU" if not self.use_gpu else "GPU"
+    
     def _validate_voice(self) -> None:
         available = self._engine.get_voices()
         if self.voice not in available:

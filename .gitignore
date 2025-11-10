@@ -4,3 +4,6 @@ __pycache__
 .env
 .python-version
 .venv
+benchmark_outputs
+*.wav
+*.log

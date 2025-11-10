@@ -12,6 +12,17 @@ Talk to your robot and it talks back! This conversational AI assistant uses:
 
 No cloud services required—everything runs locally in headless mode, perfect for SSH access and minimal setups.
 
+## Available Modes
+
+| Mode | Script | Features |
+|------|--------|----------|
+| **Basic** | `main.py` | Continuous listening, offline, no internet |
+| **Internet** | `main_internetconnected.py` | Continuous listening, web search, weather tools |
+| **Wake Word** | `main_wakeword.py` | Wake word activation ("Hey Jarvis"), offline |
+| **Wake Word + Internet** | `main_wakeword_internetconnected.py` | Wake word activation with internet tools |
+
+See [WAKEWORD_GUIDE.md](WAKEWORD_GUIDE.md) for wake word setup and configuration.
+
 ## Quick Start
 
 ### 1. Install System Dependencies
@@ -47,11 +58,20 @@ pactl set-default-source <source_name>
 ```
 
 ### 5. Run!
+
+**Option A: Continuous Listening (default)**
 ```bash
 python main.py
 ```
 
+**Option B: Wake Word Activation (hands-free)**
+```bash
+python main_wakeword.py
+```
+
 Start talking—your robot is listening! 🎤
+
+> **💡 Wake Word Mode**: Say "Hey Jarvis" to activate the assistant, then speak your command. See [WAKEWORD_GUIDE.md](WAKEWORD_GUIDE.md) for details.
 
 ## Troubleshooting
 

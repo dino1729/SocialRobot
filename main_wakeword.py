@@ -1,4 +1,4 @@
-"""Entrypoint for the basic voice assistant."""
+"""Entrypoint for the basic voice assistant with wake word detection."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ import argparse
 import os
 import threading
 import time
+import struct
+import numpy as np
 from typing import Optional
 
+import pyaudio
 from dotenv import load_dotenv
+from openwakeword.model import Model
 
 from audio.stt import FasterWhisperSTT
 from audio.tts import KokoroTTS
@@ -22,6 +26,8 @@ load_dotenv()
 # Configuration from environment variables
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:270m")
+WAKEWORD_MODEL = os.getenv("WAKEWORD_MODEL", "hey_jarvis_v0.1")  # Default wake word
+WAKEWORD_THRESHOLD = float(os.getenv("WAKEWORD_THRESHOLD", "0.5"))  # Threshold for detection
 
 
 def _get_memory_stats() -> dict[str, float]:
@@ -129,10 +135,107 @@ def _get_default_compute_type(device: str) -> str:
     return "float16"
 
 
+class WakeWordDetector:
+    """Wake word detector using OpenWakeWord."""
+    
+    def __init__(
+        self,
+        wakeword_models: list[str],
+        threshold: float = 0.5,
+        chunk_size: int = 1280,
+        sample_rate: int = 16000,
+        device_index: Optional[int] = None,
+    ) -> None:
+        """Initialize wake word detector.
+        
+        Args:
+            wakeword_models: List of wake word model names to load
+            threshold: Detection threshold (0.0 to 1.0)
+            chunk_size: Audio chunk size in samples
+            sample_rate: Audio sample rate in Hz
+            device_index: PyAudio device index (None for default)
+        """
+        self.wakeword_models = wakeword_models
+        self.threshold = threshold
+        self.chunk_size = chunk_size
+        self.sample_rate = sample_rate
+        self.device_index = device_index
+        
+        # Initialize OpenWakeWord model
+        print(f"-> Loading wake word model(s): {', '.join(wakeword_models)}")
+        self.oww_model = Model(wakeword_models=wakeword_models, inference_framework="onnx")
+        
+        # Initialize PyAudio
+        self.audio = pyaudio.PyAudio()
+        self.stream: Optional[pyaudio.Stream] = None
+        self.is_running = False
+        self.detection_callback: Optional[callable] = None
+    
+    def set_detection_callback(self, callback: callable) -> None:
+        """Set callback function to be called when wake word is detected."""
+        self.detection_callback = callback
+    
+    def start(self) -> None:
+        """Start listening for wake word."""
+        if self.is_running:
+            return
+        
+        self.is_running = True
+        
+        # Open audio stream
+        self.stream = self.audio.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self.sample_rate,
+            input=True,
+            input_device_index=self.device_index,
+            frames_per_buffer=self.chunk_size,
+        )
+        
+        print(f"-> Wake word detector ready! Say '{self.wakeword_models[0].replace('_', ' ')}' to activate...")
+        
+        # Start listening loop
+        while self.is_running:
+            try:
+                # Read audio chunk
+                audio_data = self.stream.read(self.chunk_size, exception_on_overflow=False)
+                
+                # Convert to numpy array
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                
+                # Get predictions
+                predictions = self.oww_model.predict(audio_array)
+                
+                # Check for wake word detection
+                for model_name, score in predictions.items():
+                    if score >= self.threshold:
+                        print(f"🎤 Wake word detected! (confidence: {score:.2f})")
+                        if self.detection_callback:
+                            self.detection_callback()
+                        break
+                
+            except Exception as e:
+                if self.is_running:
+                    print(f"Wake word detection error: {e}")
+                break
+    
+    def stop(self) -> None:
+        """Stop listening for wake word."""
+        self.is_running = False
+        
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+        
+        self.audio.terminate()
+
+
 def main(
     enable_memory_monitor: bool = True,
     monitor_interval: int = 60,
     compute_type: Optional[str] = None,
+    wakeword_threshold: float = WAKEWORD_THRESHOLD,
 ) -> None:
     """Initializes all components and starts the main interaction loop.
     
@@ -141,10 +244,13 @@ def main(
         monitor_interval: Seconds between memory stat updates (default: 60)
         compute_type: Compute type for faster-whisper ('int8', 'float16', or 'float32').
                      If None, auto-detects based on device and platform.
+        wakeword_threshold: Detection threshold for wake word (0.0 to 1.0)
     """
-    print("-> Initializing basic voice assistant...")
+    print("-> Initializing voice assistant with wake word detection...")
     print(f"-> Ollama URL: {OLLAMA_URL}")
     print(f"-> Ollama Model: {OLLAMA_MODEL}")
+    print(f"-> Wake Word: {WAKEWORD_MODEL}")
+    print(f"-> Wake Word Threshold: {wakeword_threshold}")
     
     # Display initial memory stats
     if enable_memory_monitor:
@@ -184,7 +290,7 @@ def main(
         url=OLLAMA_URL,
         model=OLLAMA_MODEL,
         stream=True,
-        system_prompt="You are a world-class knowledgeable AI voice assistant, Orion, hosted on a Jetson Orin Nano Super. Your mission is to assist users with any questions or tasks they have on a wide range of topics. Use your knowledge, skills, and resources to provide accurate, relevant, and helpful responses. Please remember that you are a voice assistant and keep answers brief, concise and within 1-2 sentences, unless it's absolutely necessary to give a longer response. Be polite, friendly, and respectful in your interactions, and try to satisfy the user’s needs as best as you can. Dont include any emojis or asterisks or any other formatting in your responses.",
+        system_prompt="You are a world-class knowledgeable AI voice assistant, Orion, hosted on a Jetson Orin Nano Super. Your mission is to assist users with any questions or tasks they have on a wide range of topics. Use your knowledge, skills, and resources to provide accurate, relevant, and helpful responses. Please remember that you are a voice assistant and keep answers brief, concise and within 1-2 sentences, unless it's absolutely necessary to give a longer response. Be polite, friendly, and respectful in your interactions, and try to satisfy the user's needs as best as you can. Dont include any emojis or asterisks or any other formatting in your responses.",
     )
 
     # Use GPU for TTS if available (will fallback to CPU if not available)
@@ -192,6 +298,7 @@ def main(
 
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
+    listening_active = threading.Event()
 
     def on_speech_detected(raw_bytes: bytes) -> None:
         """Callback function triggered when VAD detects speech."""
@@ -210,7 +317,8 @@ def main(
         print("-> User said:", recognized_text)
 
         if not recognized_text.strip():
-            vad_listener.enable_vad()
+            vad_listener.stop()
+            listening_active.clear()
             return
 
         # Simple echo cancellation: ignore if user input matches the last bot response
@@ -223,21 +331,24 @@ def main(
                 or normalized_bot in normalized_user
             ):
                 print("-> Ignoring self-echo from recent response.")
-                vad_listener.enable_vad()
+                vad_listener.stop()
+                listening_active.clear()
                 return
 
         llm_response = ollama_client.query(recognized_text)
         print("-> Bot response:", llm_response)
         
         if not llm_response.strip():
-            vad_listener.enable_vad()
+            vad_listener.stop()
+            listening_active.clear()
             return
 
         try:
             audio_data = tts_model.synthesize(llm_response)
         except Exception as exc:  # pragma: no cover - defensive logging only
             print("TTS error:", exc)
-            vad_listener.enable_vad()
+            vad_listener.stop()
+            listening_active.clear()
             return
 
         last_bot_response = llm_response
@@ -251,21 +362,52 @@ def main(
             process_mem = _get_process_memory()
             print(f"-> {_format_memory_stats(stats, process_mem)}")
         
-        vad_listener.enable_vad()
+        # Stop VAD listener after response
+        vad_listener.stop()
+        listening_active.clear()
 
-    vad_listener = VADListener(config=vad_config, device_index=None, on_speech_callback=on_speech_detected)
+    def on_wakeword_detected() -> None:
+        """Callback when wake word is detected - start listening for command."""
+        nonlocal vad_listener
+        
+        if listening_active.is_set():
+            return  # Already listening
+        
+        listening_active.set()
+        print("-> Listening for command...")
+        
+        # Create new VAD listener for this session
+        vad_listener = VADListener(
+            config=vad_config,
+            device_index=None,
+            on_speech_callback=on_speech_detected
+        )
+        vad_listener.start()
 
-    print("-> Voice assistant ready! Listening for speech...")
+    # Initialize wake word detector
+    wakeword_detector = WakeWordDetector(
+        wakeword_models=[WAKEWORD_MODEL],
+        threshold=wakeword_threshold,
+        chunk_size=1280,
+        sample_rate=16000,
+        device_index=None,
+    )
+    wakeword_detector.set_detection_callback(on_wakeword_detected)
+
+    print("-> Voice assistant ready with wake word detection!")
     if enable_memory_monitor:
         print(f"-> Memory monitoring enabled (updates every {monitor_interval}s)")
     print("-> Press Ctrl+C to stop.")
     
     try:
-        vad_listener.start()
+        wakeword_detector.start()
     except KeyboardInterrupt:
         print("\n-> Shutting down...")
     finally:
-        vad_listener.stop()
+        wakeword_detector.stop()
+        
+        if vad_listener:
+            vad_listener.stop()
         
         # Stop memory monitor thread
         if enable_memory_monitor:
@@ -284,24 +426,27 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Voice assistant with speech recognition and text-to-speech",
+        description="Voice assistant with wake word detection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Use default settings (auto-detects compute type)
-  python main.py
+  python main_wakeword.py
   
   # Use int8 compute type (for Jetson Orin Nano)
-  python main.py --compute-type int8
+  python main_wakeword.py --compute-type int8
   
   # Use float16 compute type (for desktop GPUs like RTX 5090)
-  python main.py --compute-type float16
+  python main_wakeword.py --compute-type float16
+  
+  # Custom wake word threshold
+  python main_wakeword.py --wakeword-threshold 0.6
   
   # Disable memory monitoring
-  python main.py --no-memory-monitor
+  python main_wakeword.py --no-memory-monitor
   
   # Change memory monitor interval
-  python main.py --monitor-interval 30
+  python main_wakeword.py --monitor-interval 30
         """,
     )
     
@@ -312,6 +457,13 @@ Examples:
         default=None,
         help="Compute type for faster-whisper. Options: int8 (Jetson), float16 (desktop GPUs), float32. "
              "If not specified, auto-detects based on device and platform.",
+    )
+    
+    parser.add_argument(
+        "--wakeword-threshold",
+        type=float,
+        default=WAKEWORD_THRESHOLD,
+        help=f"Wake word detection threshold (0.0 to 1.0, default: {WAKEWORD_THRESHOLD})",
     )
     
     parser.add_argument(
@@ -333,4 +485,6 @@ Examples:
         enable_memory_monitor=not args.no_memory_monitor,
         monitor_interval=args.monitor_interval,
         compute_type=args.compute_type,
+        wakeword_threshold=args.wakeword_threshold,
     )
+
