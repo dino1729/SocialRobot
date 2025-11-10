@@ -7,13 +7,31 @@ echo "Audio Configuration Check"
 echo "============================================================"
 echo ""
 
-# Check if PulseAudio is running
-if ! pulseaudio --check 2>/dev/null; then
-    echo "⚠️  WARNING: PulseAudio is not running!"
-    echo "   Starting PulseAudio..."
-    pulseaudio --start
+# Check if PulseAudio is running and responsive
+echo "Checking PulseAudio status..."
+if ! pactl info &>/dev/null; then
+    echo "⚠️  PulseAudio not responding. Restarting..."
+    
+    # Kill any existing PulseAudio instances
+    pulseaudio --kill 2>/dev/null
     sleep 1
+    
+    # Start PulseAudio fresh
+    pulseaudio --start 2>/dev/null
+    sleep 2
+    
+    # Verify it's working
+    if pactl info &>/dev/null; then
+        echo "✓ PulseAudio started successfully"
+    else
+        echo "❌ ERROR: Failed to start PulseAudio"
+        echo "   Try running manually: pulseaudio --kill && pulseaudio --start"
+        exit 1
+    fi
+else
+    echo "✓ PulseAudio is running"
 fi
+echo ""
 
 # Get current defaults
 CURRENT_SOURCE=$(pactl get-default-source 2>/dev/null)
