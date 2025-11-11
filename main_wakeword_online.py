@@ -1,39 +1,32 @@
-"""Entrypoint for the internet-connected voice assistant with wake word detection and tool support."""
+"""Entrypoint for the basic voice assistant with wake word detection (Online LiteLLM version)."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import threading
 import time
 import struct
 import numpy as np
-from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import pyaudio
-import requests
 from dotenv import load_dotenv
 from openwakeword.model import Model
 
 from audio.stt import FasterWhisperSTT
 from audio.vad import VADConfig, VADListener
 from audio.engine_config import create_tts_engine, TTSEngine
-from llm.ollama import OllamaClient
-
-# Import all tools from the centralized tools module
-from tools import TOOLS, execute_tool_call
+from llm.litellm import LiteLLMClient
 
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Configuration from environment variables
-FIRECRAWL_URL = os.getenv("FIRECRAWL_URL", "http://localhost:3002")
-OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")  # Tool-capable model required
+LITELLM_URL = os.getenv("LITELLM_URL", "https://api.openai.com/v1/chat/completions")
+LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gpt-3.5-turbo")
+LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 WAKEWORD_MODEL = os.getenv("WAKEWORD_MODEL", "hey_jarvis_v0.1")  # Default wake word
 WAKEWORD_THRESHOLD = float(os.getenv("WAKEWORD_THRESHOLD", "0.5"))  # Threshold for detection
 
@@ -281,116 +274,6 @@ class WakeWordDetector:
         self.audio.terminate()
 
 
-# ============================================================================
-# Enhanced Ollama Client with Tool Support
-# ============================================================================
-
-class OllamaClientWithTools:
-    """Enhanced Ollama client that supports tool calling."""
-    
-    def __init__(
-        self,
-        url: str = "http://localhost:11434/api/chat",
-        model: str = "llama3.2:1b",
-        stream: bool = False,  # Disable streaming for tool support
-        system_prompt: Optional[str] = None,
-    ) -> None:
-        self.url = url
-        self.model = model
-        self.stream = stream
-        self.system_prompt = system_prompt
-        self.conversation_history: list[dict] = []
-        
-        if system_prompt:
-            self.conversation_history.append({
-                "role": "system",
-                "content": system_prompt
-            })
-    
-    def query_with_tools(self, user_text: str, tools: list[dict]) -> str:
-        """Query Ollama with tool support and handle tool calls."""
-        # Add user message to history
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_text
-        })
-        
-        max_iterations = 5  # Prevent infinite loops
-        iteration = 0
-        
-        while iteration < max_iterations:
-            iteration += 1
-            
-            # Make request to Ollama with tools
-            payload = {
-                "model": self.model,
-                "messages": self.conversation_history,
-                "stream": self.stream,
-                "tools": tools
-            }
-            
-            try:
-                response = requests.post(self.url, json=payload, timeout=120)
-                
-                if response.status_code != 200:
-                    print(f"Ollama error: {response.status_code}")
-                    return "Sorry, I encountered an error processing your request."
-                
-                data = response.json()
-                message = data.get("message", {})
-                
-                # Check if model wants to use tools
-                tool_calls = message.get("tool_calls", [])
-                
-                if tool_calls:
-                    print(f"🔧 Model requested {len(tool_calls)} tool call(s)")
-                    
-                    # Add assistant's tool call message to history
-                    self.conversation_history.append(message)
-                    
-                    # Execute each tool call
-                    for tool_call in tool_calls:
-                        function = tool_call.get("function", {})
-                        tool_name = function.get("name", "")
-                        arguments = function.get("arguments", {})
-                        
-                        print(f"   Calling: {tool_name}({arguments})")
-                        
-                        # Execute the tool
-                        tool_result = execute_tool_call(tool_name, arguments)
-                        
-                        # Add tool result to conversation history
-                        self.conversation_history.append({
-                            "role": "tool",
-                            "content": tool_result
-                        })
-                    
-                    # Continue loop to let model process tool results
-                    continue
-                
-                else:
-                    # No tool calls, model provided final answer
-                    content = message.get("content", "")
-                    
-                    # Add assistant's response to history
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": content
-                    })
-                    
-                    return content.strip()
-                    
-            except Exception as e:
-                print(f"Error querying Ollama: {e}")
-                return "Sorry, I encountered an error processing your request."
-        
-        return "I apologize, but I couldn't complete your request after multiple attempts."
-
-
-# ============================================================================
-# Main Function
-# ============================================================================
-
 def main(
     enable_memory_monitor: bool = True,
     monitor_interval: int = 60,
@@ -414,26 +297,19 @@ def main(
         tts_voice: Voice to use for Kokoro TTS (e.g., 'af_bella', 'af_sarah')
         tts_speed: Speech speed for Kokoro TTS (default: 1.0)
     """
-    print("-> Initializing internet-connected voice assistant with wake word detection...")
-    print(f"-> Ollama URL: {OLLAMA_URL}")
-    print(f"-> Ollama Model: {OLLAMA_MODEL}")
-    print(f"-> Firecrawl URL: {FIRECRAWL_URL}")
-    print(f"-> Weather API: {'✓ Configured' if OPENWEATHERMAP_API_KEY else '✗ Not configured'}")
+    print("-> Initializing voice assistant with wake word detection (Online LiteLLM version)...")
+    print(f"-> LiteLLM URL: {LITELLM_URL}")
+    print(f"-> LiteLLM Model: {LITELLM_MODEL}")
     print(f"-> Wake Word: {WAKEWORD_MODEL}")
     print(f"-> Wake Word Threshold: {wakeword_threshold}")
     print(f"-> TTS Engine: {tts_engine.upper()}")
     print(f"-> TTS GPU: {'Enabled' if tts_use_gpu else 'Disabled'}")
     
-    # Check Firecrawl connectivity (using root endpoint since /health doesn't exist)
-    try:
-        response = requests.get(f"{FIRECRAWL_URL}/", timeout=5)
-        if response.status_code == 200:
-            print("-> ✓ Firecrawl is accessible")
-        else:
-            print(f"-> ⚠️  Firecrawl returned status {response.status_code}")
-    except Exception as e:
-        print(f"-> ⚠️  Warning: Cannot reach Firecrawl at {FIRECRAWL_URL}: {e}")
-        print("   Make sure Firecrawl is running (see QUICKSTART.md)")
+    # Validate API key
+    if not LITELLM_API_KEY:
+        print("-> ERROR: LITELLM_API_KEY is not set in .env file!")
+        print("-> Please add LITELLM_API_KEY to your .env file and try again.")
+        return
     
     # Display initial memory stats
     if enable_memory_monitor:
@@ -469,20 +345,13 @@ def main(
     
     stt_model = FasterWhisperSTT(model_size_or_path="tiny.en", device=stt_device, compute_type=compute_type)
 
-    # Use a tool-capable model (configured via environment variable)
-    # Include current date/time so the model knows what "now" is
-    current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    system_prompt = f"""You are a world-class knowledgeable AI voice assistant, Orion, hosted on a Jetson Orin Nano Super. Your mission is to assist users with any questions or tasks they have on a wide range of topics. Use your knowledge, skills, and resources to provide accurate, relevant, and helpful responses. Please remember that you are a voice assistant and keep answers brief, concise and within 1-2 sentences, unless it's absolutely necessary to give a longer response. Be polite, friendly, and respectful in your interactions, and try to satisfy the user's needs as best as you can. Dont include any emojis or asterisks or any other formatting in your responses.
-
-IMPORTANT: Today's date is {current_datetime}. When searching for current or recent information, use the current year (2025) in your search queries, not outdated years like 2023 or 2024.
-
-You have access to tools including web search (search_web), webpage scraping (scrape_url), and weather information (get_weather). Use the search_web tool for current events, news, stock information, earnings reports, and any time-sensitive information you don't know. Use scrape_url to read specific webpages. Use get_weather to check weather conditions for any location."""
-    
-    ollama_client = OllamaClientWithTools(
-        url=OLLAMA_URL,
-        model=OLLAMA_MODEL,
-        stream=False,  # Disable streaming for tool support
-        system_prompt=system_prompt,
+    llm_client = LiteLLMClient(
+        url=LITELLM_URL,
+        model=LITELLM_MODEL,
+        api_key=LITELLM_API_KEY,
+        stream=True,
+        max_tokens=2048,
+        system_prompt="You are a world-class knowledgeable AI voice assistant, Orion, hosted on a Jetson Orin Nano Super. Your mission is to assist users with any questions or tasks they have on a wide range of topics. Use your knowledge, skills, and resources to provide accurate, relevant, and helpful responses. As a voice assistant, provide clear and complete answers that are easy to understand when spoken aloud. For simple questions, keep responses concise (2-3 sentences). For complex topics or detailed questions, provide thorough explanations with sufficient detail to be truly helpful. Always prioritize clarity and completeness over brevity. Be polite, friendly, and respectful in your interactions. Don't include any emojis, asterisks, or formatting symbols in your responses since they don't work well in speech.",
     )
 
     # Initialize TTS engine based on user selection
@@ -546,8 +415,7 @@ You have access to tools including web search (search_web), webpage scraping (sc
                 wakeword_detector.resume()
                 return
 
-        # Query with tool support
-        llm_response = ollama_client.query_with_tools(recognized_text, TOOLS)
+        llm_response = llm_client.query(recognized_text)
         print("-> Bot response:", llm_response)
         
         if not llm_response.strip():
@@ -625,10 +493,6 @@ You have access to tools including web search (search_web), webpage scraping (sc
     wakeword_detector.set_detection_callback(on_wakeword_detected)
 
     print("-> Voice assistant ready with wake word detection!")
-    print("-> 🌐 Internet access enabled via Firecrawl tools")
-    if OPENWEATHERMAP_API_KEY:
-        print("-> 🌤️  Weather information enabled via OpenWeatherMap")
-    print("-> Ask me to search for information, check weather, or scrape webpages!")
     if enable_memory_monitor:
         print(f"-> Memory monitoring enabled (updates every {monitor_interval}s)")
     print("-> Press Ctrl+C to stop.")
@@ -660,39 +524,39 @@ You have access to tools including web search (search_web), webpage scraping (sc
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Internet-connected voice assistant with wake word detection and tool support",
+        description="Voice assistant with wake word detection (Online LiteLLM version)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Use default settings (auto-detects compute type, uses Kokoro TTS)
-  python main_wakeword_internetconnected.py
+  python main_wakeword_online.py
   
   # Use Piper TTS instead of Kokoro
-  python main_wakeword_internetconnected.py --tts-engine piper
+  python main_wakeword_online.py --tts-engine piper
   
   # Use Piper TTS with GPU acceleration
-  python main_wakeword_internetconnected.py --tts-engine piper --tts-gpu
+  python main_wakeword_online.py --tts-engine piper --tts-gpu
   
   # Use Kokoro with different voice and speed
-  python main_wakeword_internetconnected.py --tts-engine kokoro --tts-voice af_sarah --tts-speed 1.2
+  python main_wakeword_online.py --tts-engine kokoro --tts-voice af_sarah --tts-speed 1.2
   
   # Use int8 compute type (for Jetson Orin Nano)
-  python main_wakeword_internetconnected.py --compute-type int8
+  python main_wakeword_online.py --compute-type int8
   
   # Use float16 compute type (for desktop GPUs like RTX 5090)
-  python main_wakeword_internetconnected.py --compute-type float16
+  python main_wakeword_online.py --compute-type float16
   
   # Custom wake word threshold
-  python main_wakeword_internetconnected.py --wakeword-threshold 0.6
+  python main_wakeword_online.py --wakeword-threshold 0.6
   
   # Disable memory monitoring
-  python main_wakeword_internetconnected.py --no-memory-monitor
+  python main_wakeword_online.py --no-memory-monitor
   
   # Change memory monitor interval
-  python main_wakeword_internetconnected.py --monitor-interval 30
+  python main_wakeword_online.py --monitor-interval 30
   
   # Combine multiple options
-  python main_wakeword_internetconnected.py --tts-engine piper --tts-gpu --compute-type int8 --wakeword-threshold 0.55
+  python main_wakeword_online.py --tts-engine piper --tts-gpu --compute-type int8 --wakeword-threshold 0.55
         """,
     )
     
@@ -765,4 +629,5 @@ Examples:
         tts_voice=args.tts_voice,
         tts_speed=args.tts_speed,
     )
+
 

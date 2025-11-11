@@ -14,8 +14,8 @@ import requests
 from dotenv import load_dotenv
 
 from audio.stt import FasterWhisperSTT
-from audio.tts import KokoroTTS
 from audio.vad import VADConfig, VADListener
+from audio.engine_config import create_tts_engine, TTSEngine
 from llm.ollama import OllamaClient
 
 # Import all tools from the centralized tools module
@@ -251,6 +251,10 @@ def main(
     enable_memory_monitor: bool = True,
     monitor_interval: int = 60,
     compute_type: Optional[str] = None,
+    tts_engine: str = "kokoro",
+    tts_use_gpu: bool = False,
+    tts_voice: Optional[str] = None,
+    tts_speed: float = 1.0,
 ) -> None:
     """Initializes all components and starts the main interaction loop.
     
@@ -259,12 +263,18 @@ def main(
         monitor_interval: Seconds between memory stat updates (default: 60)
         compute_type: Compute type for faster-whisper ('int8', 'float16', or 'float32').
                      If None, auto-detects based on device and platform.
+        tts_engine: TTS engine to use ('kokoro' or 'piper')
+        tts_use_gpu: Enable GPU for TTS (if available)
+        tts_voice: Voice to use for Kokoro TTS (e.g., 'af_bella', 'af_sarah')
+        tts_speed: Speech speed for Kokoro TTS (default: 1.0)
     """
     print("-> Initializing internet-connected voice assistant...")
     print(f"-> Ollama URL: {OLLAMA_URL}")
     print(f"-> Ollama Model: {OLLAMA_MODEL}")
     print(f"-> Firecrawl URL: {FIRECRAWL_URL}")
     print(f"-> Weather API: {'✓ Configured' if OPENWEATHERMAP_API_KEY else '✗ Not configured'}")
+    print(f"-> TTS Engine: {tts_engine.upper()}")
+    print(f"-> TTS GPU: {'Enabled' if tts_use_gpu else 'Disabled'}")
     
     # Check Firecrawl connectivity (using root endpoint since /health doesn't exist)
     try:
@@ -327,8 +337,13 @@ You have access to tools including web search (search_web), webpage scraping (sc
         system_prompt=system_prompt,
     )
 
-    # Use GPU for TTS if available (will fallback to CPU if not available)
-    tts_model = KokoroTTS(voice="af_bella", speed=1.0, use_gpu=False)
+    # Initialize TTS engine based on user selection
+    tts_kwargs = {"use_gpu": tts_use_gpu}
+    if tts_engine == "kokoro":
+        tts_kwargs["voice"] = tts_voice or "af_bella"
+        tts_kwargs["speed"] = tts_speed
+    
+    tts_model = create_tts_engine(engine=tts_engine, **tts_kwargs)
 
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
@@ -433,8 +448,17 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use default settings (auto-detects compute type)
+  # Use default settings (auto-detects compute type, uses Kokoro TTS)
   python main_internetconnected.py
+  
+  # Use Piper TTS instead of Kokoro
+  python main_internetconnected.py --tts-engine piper
+  
+  # Use Piper TTS with GPU acceleration
+  python main_internetconnected.py --tts-engine piper --tts-gpu
+  
+  # Use Kokoro with different voice and speed
+  python main_internetconnected.py --tts-engine kokoro --tts-voice af_sarah --tts-speed 1.2
   
   # Use int8 compute type (for Jetson Orin Nano)
   python main_internetconnected.py --compute-type int8
@@ -447,6 +471,9 @@ Examples:
   
   # Change memory monitor interval
   python main_internetconnected.py --monitor-interval 30
+  
+  # Combine multiple options
+  python main_internetconnected.py --tts-engine piper --tts-gpu --compute-type int8
         """,
     )
     
@@ -457,6 +484,34 @@ Examples:
         default=None,
         help="Compute type for faster-whisper. Options: int8 (Jetson), float16 (desktop GPUs), float32. "
              "If not specified, auto-detects based on device and platform.",
+    )
+    
+    parser.add_argument(
+        "--tts-engine",
+        type=str,
+        choices=["kokoro", "piper"],
+        default="kokoro",
+        help="TTS engine to use (default: kokoro)",
+    )
+    
+    parser.add_argument(
+        "--tts-gpu",
+        action="store_true",
+        help="Enable GPU acceleration for TTS (if available)",
+    )
+    
+    parser.add_argument(
+        "--tts-voice",
+        type=str,
+        default=None,
+        help="Voice to use for Kokoro TTS (e.g., af_bella, af_sarah, am_adam, am_michael, bf_emma, bf_isabella, bm_george, bm_lewis). Only applicable to Kokoro.",
+    )
+    
+    parser.add_argument(
+        "--tts-speed",
+        type=float,
+        default=1.0,
+        help="Speech speed for Kokoro TTS (default: 1.0). Only applicable to Kokoro.",
     )
     
     parser.add_argument(
@@ -478,5 +533,9 @@ Examples:
         enable_memory_monitor=not args.no_memory_monitor,
         monitor_interval=args.monitor_interval,
         compute_type=args.compute_type,
+        tts_engine=args.tts_engine,
+        tts_use_gpu=args.tts_gpu,
+        tts_voice=args.tts_voice,
+        tts_speed=args.tts_speed,
     )
 

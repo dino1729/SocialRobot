@@ -6,4 +6,5 @@ __pycache__
 .venv
 benchmark_outputs
 *.wav
+*.mp3
 *.log

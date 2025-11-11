@@ -15,8 +15,8 @@ from dotenv import load_dotenv
 from openwakeword.model import Model
 
 from audio.stt import FasterWhisperSTT
-from audio.tts import KokoroTTS
 from audio.vad import VADConfig, VADListener
+from audio.engine_config import create_tts_engine, TTSEngine
 from llm.ollama import OllamaClient
 
 
@@ -169,11 +169,44 @@ class WakeWordDetector:
         self.audio = pyaudio.PyAudio()
         self.stream: Optional[pyaudio.Stream] = None
         self.is_running = False
+        self.is_paused = False
         self.detection_callback: Optional[callable] = None
+        self.last_detection_time = 0.0
+    
+    def _play_bling_sound(self) -> None:
+        """Play F1 beep notification sound when wakeword is detected."""
+        try:
+            import subprocess
+            
+            # Get the directory of the current script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            sound_path = os.path.join(script_dir, "f1_beep.mp3")
+            
+            # Play the sound using ffplay (part of ffmpeg, likely already installed)
+            if os.path.exists(sound_path):
+                subprocess.run(
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", sound_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False
+                )
+        except Exception as e:
+            # Silently fail if sound playback has issues
+            pass
     
     def set_detection_callback(self, callback: callable) -> None:
         """Set callback function to be called when wake word is detected."""
         self.detection_callback = callback
+    
+    def pause(self) -> None:
+        """Pause wake word detection (but keep stream active)."""
+        self.is_paused = True
+    
+    def resume(self) -> None:
+        """Resume wake word detection."""
+        # Reset the model's internal buffer to prevent false detections from residual audio
+        self.oww_model.reset()
+        self.is_paused = False
     
     def start(self) -> None:
         """Start listening for wake word."""
@@ -200,18 +233,27 @@ class WakeWordDetector:
                 # Read audio chunk
                 audio_data = self.stream.read(self.chunk_size, exception_on_overflow=False)
                 
+                # Skip processing if paused
+                if self.is_paused:
+                    continue
+                
                 # Convert to numpy array
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)
                 
                 # Get predictions
                 predictions = self.oww_model.predict(audio_array)
                 
-                # Check for wake word detection
+                # Check for wake word detection with debouncing (minimum 2 seconds between detections)
+                current_time = time.time()
                 for model_name, score in predictions.items():
                     if score >= self.threshold:
-                        print(f"🎤 Wake word detected! (confidence: {score:.2f})")
-                        if self.detection_callback:
-                            self.detection_callback()
+                        if current_time - self.last_detection_time >= 2.0:
+                            print(f"🎤 Wake word detected! (confidence: {score:.2f})")
+                            self.last_detection_time = current_time
+                            # Play notification sound
+                            self._play_bling_sound()
+                            if self.detection_callback:
+                                self.detection_callback()
                         break
                 
             except Exception as e:
@@ -236,6 +278,10 @@ def main(
     monitor_interval: int = 60,
     compute_type: Optional[str] = None,
     wakeword_threshold: float = WAKEWORD_THRESHOLD,
+    tts_engine: str = "kokoro",
+    tts_use_gpu: bool = False,
+    tts_voice: Optional[str] = None,
+    tts_speed: float = 1.0,
 ) -> None:
     """Initializes all components and starts the main interaction loop.
     
@@ -245,12 +291,18 @@ def main(
         compute_type: Compute type for faster-whisper ('int8', 'float16', or 'float32').
                      If None, auto-detects based on device and platform.
         wakeword_threshold: Detection threshold for wake word (0.0 to 1.0)
+        tts_engine: TTS engine to use ('kokoro' or 'piper')
+        tts_use_gpu: Enable GPU for TTS (if available)
+        tts_voice: Voice to use for Kokoro TTS (e.g., 'af_bella', 'af_sarah')
+        tts_speed: Speech speed for Kokoro TTS (default: 1.0)
     """
     print("-> Initializing voice assistant with wake word detection...")
     print(f"-> Ollama URL: {OLLAMA_URL}")
     print(f"-> Ollama Model: {OLLAMA_MODEL}")
     print(f"-> Wake Word: {WAKEWORD_MODEL}")
     print(f"-> Wake Word Threshold: {wakeword_threshold}")
+    print(f"-> TTS Engine: {tts_engine.upper()}")
+    print(f"-> TTS GPU: {'Enabled' if tts_use_gpu else 'Disabled'}")
     
     # Display initial memory stats
     if enable_memory_monitor:
@@ -293,8 +345,13 @@ def main(
         system_prompt="You are a world-class knowledgeable AI voice assistant, Orion, hosted on a Jetson Orin Nano Super. Your mission is to assist users with any questions or tasks they have on a wide range of topics. Use your knowledge, skills, and resources to provide accurate, relevant, and helpful responses. Please remember that you are a voice assistant and keep answers brief, concise and within 1-2 sentences, unless it's absolutely necessary to give a longer response. Be polite, friendly, and respectful in your interactions, and try to satisfy the user's needs as best as you can. Dont include any emojis or asterisks or any other formatting in your responses.",
     )
 
-    # Use GPU for TTS if available (will fallback to CPU if not available)
-    tts_model = KokoroTTS(voice="af_bella", speed=1.0, use_gpu=False)
+    # Initialize TTS engine based on user selection
+    tts_kwargs = {"use_gpu": tts_use_gpu}
+    if tts_engine == "kokoro":
+        tts_kwargs["voice"] = tts_voice or "af_bella"
+        tts_kwargs["speed"] = tts_speed
+    
+    tts_model = create_tts_engine(engine=tts_engine, **tts_kwargs)
 
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
@@ -319,10 +376,22 @@ def main(
         if not recognized_text.strip():
             vad_listener.stop()
             listening_active.clear()
+            time.sleep(1.0)  # Longer delay to clear audio buffer
+            wakeword_detector.resume()
+            return
+
+        # Filter out wake word phrases - ignore if user just repeated the wake word
+        normalized_user = recognized_text.strip().lower()
+        wake_word_phrases = ["hey jarvis", "jarvis", "hey jarvis."]
+        if normalized_user in wake_word_phrases:
+            print("-> Ignoring wake word echo, waiting for actual command...")
+            vad_listener.stop()
+            listening_active.clear()
+            time.sleep(1.0)  # Longer delay to clear audio buffer
+            wakeword_detector.resume()
             return
 
         # Simple echo cancellation: ignore if user input matches the last bot response
-        normalized_user = recognized_text.strip().lower()
         normalized_bot = last_bot_response.strip().lower()
         if normalized_user and normalized_bot:
             if (
@@ -333,6 +402,8 @@ def main(
                 print("-> Ignoring self-echo from recent response.")
                 vad_listener.stop()
                 listening_active.clear()
+                time.sleep(1.0)  # Longer delay to clear audio buffer
+                wakeword_detector.resume()
                 return
 
         llm_response = ollama_client.query(recognized_text)
@@ -341,6 +412,8 @@ def main(
         if not llm_response.strip():
             vad_listener.stop()
             listening_active.clear()
+            time.sleep(1.0)  # Longer delay to clear audio buffer
+            wakeword_detector.resume()
             return
 
         try:
@@ -349,6 +422,8 @@ def main(
             print("TTS error:", exc)
             vad_listener.stop()
             listening_active.clear()
+            time.sleep(1.0)  # Longer delay to clear audio buffer
+            wakeword_detector.resume()
             return
 
         last_bot_response = llm_response
@@ -365,16 +440,30 @@ def main(
         # Stop VAD listener after response
         vad_listener.stop()
         listening_active.clear()
+        
+        # Add longer cooldown before resuming wake word detection
+        # This ensures TTS audio has completely cleared from the system
+        time.sleep(2.0)
+        
+        # Resume wake word detection
+        wakeword_detector.resume()
 
     def on_wakeword_detected() -> None:
         """Callback when wake word is detected - start listening for command."""
-        nonlocal vad_listener
+        nonlocal vad_listener, wakeword_detector
         
         if listening_active.is_set():
             return  # Already listening
         
         listening_active.set()
+        
+        # Pause wake word detection while listening for command
+        wakeword_detector.pause()
+        
         print("-> Listening for command...")
+        
+        # Delay to let wake word audio clear from buffer
+        time.sleep(0.5)
         
         # Create new VAD listener for this session
         vad_listener = VADListener(
@@ -430,8 +519,17 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use default settings (auto-detects compute type)
+  # Use default settings (auto-detects compute type, uses Kokoro TTS)
   python main_wakeword.py
+  
+  # Use Piper TTS instead of Kokoro
+  python main_wakeword.py --tts-engine piper
+  
+  # Use Piper TTS with GPU acceleration
+  python main_wakeword.py --tts-engine piper --tts-gpu
+  
+  # Use Kokoro with different voice and speed
+  python main_wakeword.py --tts-engine kokoro --tts-voice af_sarah --tts-speed 1.2
   
   # Use int8 compute type (for Jetson Orin Nano)
   python main_wakeword.py --compute-type int8
@@ -447,6 +545,9 @@ Examples:
   
   # Change memory monitor interval
   python main_wakeword.py --monitor-interval 30
+  
+  # Combine multiple options
+  python main_wakeword.py --tts-engine piper --tts-gpu --compute-type int8 --wakeword-threshold 0.55
         """,
     )
     
@@ -464,6 +565,34 @@ Examples:
         type=float,
         default=WAKEWORD_THRESHOLD,
         help=f"Wake word detection threshold (0.0 to 1.0, default: {WAKEWORD_THRESHOLD})",
+    )
+    
+    parser.add_argument(
+        "--tts-engine",
+        type=str,
+        choices=["kokoro", "piper"],
+        default="kokoro",
+        help="TTS engine to use (default: kokoro)",
+    )
+    
+    parser.add_argument(
+        "--tts-gpu",
+        action="store_true",
+        help="Enable GPU acceleration for TTS (if available)",
+    )
+    
+    parser.add_argument(
+        "--tts-voice",
+        type=str,
+        default=None,
+        help="Voice to use for Kokoro TTS (e.g., af_bella, af_sarah, am_adam, am_michael, bf_emma, bf_isabella, bm_george, bm_lewis). Only applicable to Kokoro.",
+    )
+    
+    parser.add_argument(
+        "--tts-speed",
+        type=float,
+        default=1.0,
+        help="Speech speed for Kokoro TTS (default: 1.0). Only applicable to Kokoro.",
     )
     
     parser.add_argument(
@@ -486,5 +615,9 @@ Examples:
         monitor_interval=args.monitor_interval,
         compute_type=args.compute_type,
         wakeword_threshold=args.wakeword_threshold,
+        tts_engine=args.tts_engine,
+        tts_use_gpu=args.tts_gpu,
+        tts_voice=args.tts_voice,
+        tts_speed=args.tts_speed,
     )
 

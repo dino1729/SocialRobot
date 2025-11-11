@@ -42,13 +42,22 @@ class PiperTTS:
         print(f"-> Loading Piper TTS model from {model_path}")
         
         # Load Piper voice
-        # Note: Piper has known stability issues with GPU in some environments
-        # Using CPU mode for reliability (still very fast)
+        # Try GPU if requested, but fall back to CPU if unavailable
+        actual_use_cuda = False
         if use_gpu:
-            print(f"-> Note: Piper TTS GPU mode has stability issues, using CPU")
+            try:
+                import onnxruntime as ort
+                available_providers = ort.get_available_providers()
+                if 'CUDAExecutionProvider' in available_providers or 'TensorrtExecutionProvider' in available_providers:
+                    print(f"-> Attempting to use GPU for Piper TTS")
+                    actual_use_cuda = True
+                else:
+                    print(f"-> Warning: GPU requested but no GPU provider available, using CPU")
+            except Exception as e:
+                print(f"-> Warning: GPU check failed ({e}), using CPU")
         
-        self.voice = PiperVoice.load(model_path, config_path, use_cuda=False)
-        device_str = "CPU (stable)"
+        self.voice = PiperVoice.load(model_path, config_path, use_cuda=actual_use_cuda)
+        device_str = "GPU" if actual_use_cuda else "CPU"
         
         print(f"-> Using Piper TTS for speech synthesis on {device_str}.")
 
