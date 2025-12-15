@@ -25,7 +25,9 @@ fi
 
 # Install openwakeword if not already installed
 echo "-> Installing openwakeword..."
-pip install openwakeword>=0.6.0
+# Using version 0.4.0 which includes ONNX models and doesn't require tflite-runtime
+# Version 0.6.0 has dependency issues with tflite-runtime on some platforms
+pip install openwakeword==0.4.0
 
 echo ""
 echo "-> Testing wake word installation..."
@@ -34,33 +36,34 @@ try:
     from openwakeword.model import Model
     print("✓ OpenWakeWord imported successfully")
     
-    # Initialize with default model (will download if needed)
-    print("\n-> Downloading default wake word model (hey_jarvis_v0.1)...")
-    model = Model(wakeword_models=["hey_jarvis_v0.1"], inference_framework="onnx")
-    print("✓ Wake word model loaded successfully")
+    # Initialize with default model (using 0.4.0 API with wakeword_model_paths)
+    print("\n-> Loading default wake word model (hey_jarvis_v0.1)...")
+    from pathlib import Path
+    import openwakeword
+    
+    oww_path = Path(openwakeword.__file__).parent
+    models_dir = oww_path / "resources" / "models"
+    model_path = models_dir / "hey_jarvis_v0.1.onnx"
+    
+    if model_path.exists():
+        model = Model(wakeword_model_paths=[str(model_path)])
+        print("✓ Wake word model loaded successfully")
+    else:
+        print(f"✗ Model not found at {model_path}")
+        exit(1)
     
     # List available models
     print("\n-> Available wake word models:")
-    import os
-    from pathlib import Path
     
-    # Try to find the models directory
-    try:
-        import openwakeword
-        oww_path = Path(openwakeword.__file__).parent
-        models_path = oww_path / "models"
-        
-        if models_path.exists():
-            models = [f.stem for f in models_path.glob("*.onnx") if f.is_file()]
-            if models:
-                for m in models:
-                    print(f"   - {m}")
-            else:
-                print("   (No models found in default directory)")
+    if models_dir.exists():
+        models = [f.stem for f in models_dir.glob("*.onnx") if f.is_file() and not f.stem.startswith(('melspectrogram', 'embedding', 'silero'))]
+        if models:
+            for m in models:
+                print(f"   - {m}")
         else:
-            print("   (Models directory not found)")
-    except Exception as e:
-        print(f"   (Could not list models: {e})")
+            print("   (No wake word models found)")
+    else:
+        print("   (Models directory not found)")
     
     print("\n✓ Wake word setup complete!")
     
@@ -110,10 +113,11 @@ else
     echo ""
     echo "Please check the error messages above and try again."
     echo "If the issue persists, try:"
-    echo "  pip install --upgrade openwakeword"
+    echo "  pip uninstall openwakeword"
+    echo "  pip install openwakeword==0.4.0"
     echo ""
-    echo "Or install manually:"
-    echo "  pip install openwakeword>=0.6.0"
+    echo "Note: Using version 0.4.0 which includes ONNX models"
+    echo "      and doesn't require tflite-runtime"
     echo "=================================================="
     exit 1
 fi

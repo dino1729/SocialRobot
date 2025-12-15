@@ -6,4 +6,6 @@ requests==2.32.3
 webrtcvad==2.0.10
 python-dotenv==1.0.0
 pyowm==3.5.0
-openwakeword==0.6.0
+# Note: Using openwakeword 0.4.0 which includes ONNX models and doesn't require tflite-runtime
+# Version 0.6.0 has dependency issues with tflite-runtime on some platforms
+openwakeword==0.4.0

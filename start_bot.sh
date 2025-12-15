@@ -125,6 +125,44 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     echo -e "${YELLOW}Warning: .env file not found. Make sure environment variables are configured.${NC}"
 fi
 
+# Check audio configuration (PulseAudio)
+echo -e "${BLUE}Checking audio configuration...${NC}"
+if ! command -v pactl &> /dev/null; then
+    echo -e "${YELLOW}Warning: pactl not found. Skipping audio check.${NC}"
+else
+    # Check if PulseAudio is running
+    if ! pactl info &>/dev/null; then
+        echo -e "${YELLOW}PulseAudio not responding. Attempting to restart...${NC}"
+        pulseaudio --kill 2>/dev/null
+        sleep 1
+        pulseaudio --start 2>/dev/null
+        sleep 2
+        
+        if ! pactl info &>/dev/null; then
+            echo -e "${RED}Warning: PulseAudio failed to start. Audio may not work properly.${NC}"
+            echo -e "${YELLOW}Try running: pulseaudio --kill && pulseaudio --start${NC}"
+        else
+            echo -e "${GREEN}✓ PulseAudio started${NC}"
+        fi
+    else
+        echo -e "${GREEN}✓ PulseAudio is running${NC}"
+    fi
+    
+    # Check audio devices
+    CURRENT_SOURCE=$(pactl get-default-source 2>/dev/null)
+    CURRENT_SINK=$(pactl get-default-sink 2>/dev/null)
+    
+    if [ -n "$CURRENT_SOURCE" ] && [ -n "$CURRENT_SINK" ]; then
+        echo -e "${GREEN}✓ Audio devices configured${NC}"
+        echo -e "  Input:  ${CURRENT_SOURCE}"
+        echo -e "  Output: ${CURRENT_SINK}"
+    else
+        echo -e "${YELLOW}Warning: Audio devices not properly configured${NC}"
+        echo -e "${YELLOW}Run ./check_audio_defaults.sh for details${NC}"
+    fi
+fi
+echo ""
+
 echo -e "${BLUE}Starting SocialRobot Voice Assistant...${NC}"
 echo -e "Mode:    ${GREEN}$DESCRIPTION${NC}"
 echo -e "Log:     ${GREEN}$LOG_FILE${NC}"

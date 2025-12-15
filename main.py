@@ -389,6 +389,8 @@ class WakeWordDetector:
         import numpy as np
         import pyaudio
         from openwakeword.model import Model
+        from pathlib import Path
+        import openwakeword
         
         self.wakeword_models = wakeword_models
         self.threshold = threshold
@@ -398,9 +400,12 @@ class WakeWordDetector:
         self.np = np  # Store numpy reference for use in other methods
         
         print(f"-> Loading wake word model(s): {', '.join(wakeword_models)}")
-        # openwakeword uses wakeword_models for pre-trained model names (e.g., 'hey_jarvis_v0.1')
-        # and wakeword_model_paths for custom model file paths
-        self.oww_model = Model(wakeword_models=wakeword_models, inference_framework="onnx")
+        # openwakeword 0.4.0 uses wakeword_model_paths for model file paths
+        # Convert model names to full paths (e.g., 'hey_jarvis_v0.1' -> '/path/to/hey_jarvis_v0.1.onnx')
+        oww_path = Path(openwakeword.__file__).parent
+        models_dir = oww_path / "resources" / "models"
+        model_paths = [str(models_dir / f"{model}.onnx") for model in wakeword_models]
+        self.oww_model = Model(wakeword_model_paths=model_paths)
         
         self.audio = pyaudio.PyAudio()
         self.stream: Optional[Any] = None
