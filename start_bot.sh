@@ -3,16 +3,18 @@
 # Usage: ./start_bot.sh [VARIANT] [ADDITIONAL_ARGS...]
 #
 # VARIANT options:
-#   wakeword                      - Basic voice assistant with wake word (Ollama)
-#   wakeword_online               - Basic voice assistant with wake word (LiteLLM/OpenAI)
-#   wakeword_internetconnected    - Voice assistant with internet tools (Ollama)
-#   wakeword_internetconnected_online - Voice assistant with internet tools (LiteLLM/OpenAI) [DEFAULT]
+#   basic                         - Continuous listening (Ollama) [DEFAULT]
+#   wakeword                      - Wake word activated (Ollama)
+#   wakeword_online               - Wake word activated (LiteLLM/OpenAI)
+#   tools                         - Continuous with internet tools (Ollama)
+#   wakeword_tools                - Wake word with internet tools (Ollama)
+#   wakeword_tools_online         - Wake word with internet tools (LiteLLM/OpenAI)
 #
 # Examples:
-#   ./start_bot.sh                                    # Start default (internetconnected_online)
-#   ./start_bot.sh wakeword                           # Start basic wakeword version
-#   ./start_bot.sh wakeword_online --tts-engine piper # Start online version with Piper TTS
-#   ./start_bot.sh wakeword_internetconnected --compute-type int8 --wakeword-threshold 0.6
+#   ./start_bot.sh                                    # Start default (basic)
+#   ./start_bot.sh wakeword                           # Start with wake word
+#   ./start_bot.sh wakeword --tts-engine chatterbox --voice rick_sanchez --tts-gpu
+#   ./start_bot.sh tools --compute-type int8
 
 set -e  # Exit on error
 
@@ -29,37 +31,71 @@ PID_FILE="$SCRIPT_DIR/.bot.pid"
 LOG_FILE="$SCRIPT_DIR/bot.log"
 
 # Default variant
-VARIANT="${1:-wakeword_internetconnected_online}"
+VARIANT="${1:-basic}"
 
-# If first argument is provided and looks like a variant, shift it
-if [[ "$1" == "wakeword"* ]]; then
-    shift
-fi
-
-# Map variant to script name
-case "$VARIANT" in
-    wakeword)
-        SCRIPT="main_wakeword.py"
+# Check if first argument is a known variant and shift it
+MAIN_ARGS=""
+case "$1" in
+    basic|wakeword|wakeword_online|tools|wakeword_tools|wakeword_tools_online)
+        shift
         ;;
-    wakeword_online)
-        SCRIPT="main_wakeword_online.py"
-        ;;
+    # Also support legacy variant names
     wakeword_internetconnected)
-        SCRIPT="main_wakeword_internetconnected.py"
+        VARIANT="wakeword_tools"
+        shift
         ;;
     wakeword_internetconnected_online)
-        SCRIPT="main_wakeword_internetconnected_online.py"
+        VARIANT="wakeword_tools_online"
+        shift
+        ;;
+    *)
+        # First arg is not a variant, use default
+        VARIANT="basic"
+        ;;
+esac
+
+# Map variant to main.py arguments
+case "$VARIANT" in
+    basic)
+        MAIN_ARGS=""
+        DESCRIPTION="Continuous listening (Ollama)"
+        ;;
+    wakeword)
+        MAIN_ARGS="--wakeword"
+        DESCRIPTION="Wake word activated (Ollama)"
+        ;;
+    wakeword_online)
+        MAIN_ARGS="--wakeword --llm litellm"
+        DESCRIPTION="Wake word activated (LiteLLM/OpenAI)"
+        ;;
+    tools)
+        MAIN_ARGS="--tools"
+        DESCRIPTION="Continuous with internet tools (Ollama)"
+        ;;
+    wakeword_tools)
+        MAIN_ARGS="--wakeword --tools"
+        DESCRIPTION="Wake word with internet tools (Ollama)"
+        ;;
+    wakeword_tools_online)
+        MAIN_ARGS="--wakeword --llm litellm --tools"
+        DESCRIPTION="Wake word with internet tools (LiteLLM/OpenAI)"
         ;;
     *)
         echo -e "${RED}Error: Unknown variant '$VARIANT'${NC}"
         echo ""
         echo "Available variants:"
-        echo "  wakeword                      - Basic voice assistant with wake word (Ollama)"
-        echo "  wakeword_online               - Basic voice assistant with wake word (LiteLLM/OpenAI)"
-        echo "  wakeword_internetconnected    - Voice assistant with internet tools (Ollama)"
-        echo "  wakeword_internetconnected_online - Voice assistant with internet tools (LiteLLM/OpenAI)"
+        echo "  basic                 - Continuous listening (Ollama) [DEFAULT]"
+        echo "  wakeword              - Wake word activated (Ollama)"
+        echo "  wakeword_online       - Wake word activated (LiteLLM/OpenAI)"
+        echo "  tools                 - Continuous with internet tools (Ollama)"
+        echo "  wakeword_tools        - Wake word with internet tools (Ollama)"
+        echo "  wakeword_tools_online - Wake word with internet tools (LiteLLM/OpenAI)"
         echo ""
         echo "Usage: ./start_bot.sh [VARIANT] [ADDITIONAL_ARGS...]"
+        echo ""
+        echo "Examples:"
+        echo "  ./start_bot.sh wakeword --tts-engine chatterbox --voice rick_sanchez --tts-gpu"
+        echo "  ./start_bot.sh tools --device cpu"
         exit 1
         ;;
 esac
@@ -78,9 +114,9 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
-# Check if script exists
-if [ ! -f "$SCRIPT_DIR/$SCRIPT" ]; then
-    echo -e "${RED}Error: Script '$SCRIPT' not found in $SCRIPT_DIR${NC}"
+# Check if main.py exists
+if [ ! -f "$SCRIPT_DIR/main.py" ]; then
+    echo -e "${RED}Error: main.py not found in $SCRIPT_DIR${NC}"
     exit 1
 fi
 
@@ -90,19 +126,28 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 echo -e "${BLUE}Starting SocialRobot Voice Assistant...${NC}"
-echo -e "Variant: ${GREEN}$VARIANT${NC}"
-echo -e "Script:  ${GREEN}$SCRIPT${NC}"
+echo -e "Mode:    ${GREEN}$DESCRIPTION${NC}"
 echo -e "Log:     ${GREEN}$LOG_FILE${NC}"
-if [ $# -gt 0 ]; then
-    echo -e "Args:    ${GREEN}$@${NC}"
+if [ -n "$MAIN_ARGS" ] || [ $# -gt 0 ]; then
+    echo -e "Args:    ${GREEN}$MAIN_ARGS $@${NC}"
 fi
 echo ""
 
 # Change to script directory
 cd "$SCRIPT_DIR"
 
+# Set up CUDA library paths for GPU support (fixes cuDNN loading issues)
+if [ -d "$SCRIPT_DIR/venv/lib/python3.12/site-packages/nvidia/cudnn/lib" ]; then
+    export LD_LIBRARY_PATH="$SCRIPT_DIR/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:$SCRIPT_DIR/venv/lib/python3.12/site-packages/nvidia/cublas/lib:$LD_LIBRARY_PATH"
+fi
+
+# Activate virtual environment if it exists
+if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    source "$SCRIPT_DIR/venv/bin/activate"
+fi
+
 # Start the bot in the background
-nohup python3 "$SCRIPT" "$@" > "$LOG_FILE" 2>&1 &
+nohup python3 main.py $MAIN_ARGS "$@" > "$LOG_FILE" 2>&1 &
 BOT_PID=$!
 
 # Save PID
@@ -125,4 +170,3 @@ else
     rm -f "$PID_FILE"
     exit 1
 fi
-

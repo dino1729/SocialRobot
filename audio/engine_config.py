@@ -16,6 +16,7 @@ class TTSEngine(str, Enum):
     """Available TTS engine options."""
     KOKORO = "kokoro"
     PIPER = "piper"
+    CHATTERBOX = "chatterbox"
 
 
 def create_stt_engine(
@@ -83,6 +84,7 @@ def create_tts_engine(
     use_gpu: bool = False,
     voice: Optional[str] = None,
     speed: float = 1.0,
+    voice_path: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
     """Factory function to create TTS engine.
@@ -90,8 +92,9 @@ def create_tts_engine(
     Args:
         engine: TTS engine to use
         use_gpu: Enable GPU acceleration
-        voice: Voice to use (engine-specific)
-        speed: Speech speed multiplier
+        voice: Voice to use (engine-specific, for Kokoro)
+        speed: Speech speed multiplier (for Kokoro)
+        voice_path: Path to voice WAV file for zero-shot cloning (for Chatterbox)
         **kwargs: Additional engine-specific arguments
         
     Returns:
@@ -113,6 +116,15 @@ def create_tts_engine(
         from audio.tts_piper import PiperTTS
         
         return PiperTTS(
+            use_gpu=use_gpu,
+            **kwargs,
+        )
+    
+    elif engine == TTSEngine.CHATTERBOX:
+        from audio.tts_chatterbox import ChatterboxTTS
+        
+        return ChatterboxTTS(
+            voice_path=voice_path,
             use_gpu=use_gpu,
             **kwargs,
         )

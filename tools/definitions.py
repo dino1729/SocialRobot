@@ -45,16 +45,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "Get current weather information for a specific location. Use this when asked about weather, temperature, or climate conditions.",
+            "description": "Get current weather information for a location. Use this when asked about weather, temperature, or climate conditions. If no location is specified by the user, call this with an empty location to use the default.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "location": {
                         "type": "string",
-                        "description": "City name or 'city, country code' (e.g., 'London', 'Tokyo, JP', 'New York, US')"
+                        "description": "City name or 'city, country code' (e.g., 'London', 'Tokyo, JP', 'New York, US'). Leave empty to use the default location."
                     }
                 },
-                "required": ["location"]
+                "required": []
             }
         }
     }

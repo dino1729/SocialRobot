@@ -8,3 +8,8 @@ benchmark_outputs
 *.wav
 *.mp3
 *.log
+personas/
+voices/
+audio_output/
+create_audio.py
+.bot.pid

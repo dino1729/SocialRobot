@@ -6,13 +6,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
+DEFAULT_WEATHER_LOCATION = os.getenv("DEFAULT_WEATHER_LOCATION", "")
 
 
-def get_weather(location: str) -> str:
+def get_weather(location: str = "") -> str:
     """Get current weather for a location using OpenWeatherMap API.
     
     Args:
-        location: City name or "city, country code" (e.g., "London", "Tokyo, JP")
+        location: City name or "city, country code" (e.g., "London", "Tokyo, JP").
+                  If empty/not provided, uses DEFAULT_WEATHER_LOCATION from .env
         
     Returns:
         Weather information as a string
@@ -21,7 +23,15 @@ def get_weather(location: str) -> str:
         if not OPENWEATHERMAP_API_KEY:
             return "Weather service is not configured. Please set OPENWEATHERMAP_API_KEY in your .env file."
         
-        print(f"\n🌤️  [TOOL CALL] Getting weather for: {location}")
+        # Use default location if none provided
+        if not location or not location.strip():
+            if DEFAULT_WEATHER_LOCATION:
+                location = DEFAULT_WEATHER_LOCATION
+                print(f"\n🌤️  [TOOL CALL] Using default location: {location}")
+            else:
+                return "No location specified and no DEFAULT_WEATHER_LOCATION set in .env file. Please provide a location."
+        else:
+            print(f"\n🌤️  [TOOL CALL] Getting weather for: {location}")
         
         # Try to import pyowm
         try:
@@ -29,12 +39,34 @@ def get_weather(location: str) -> str:
         except ImportError:
             return "Weather service requires 'pyowm' library. Install it with: pip install pyowm"
         
+        # Normalize location format for OpenWeatherMap
+        # Convert "City, ST" or "City, State" to "City,US" format
+        normalized_location = location.strip()
+        
+        # US state abbreviations to detect US locations
+        us_states = {
+            'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+            'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+            'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+            'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+            'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY'
+        }
+        
+        if ',' in normalized_location:
+            parts = [p.strip() for p in normalized_location.split(',')]
+            if len(parts) == 2:
+                city, state_or_country = parts
+                # Check if it looks like a US state abbreviation
+                if state_or_country.upper() in us_states:
+                    normalized_location = f"{city},US"
+                    print(f"   Normalized to: {normalized_location}")
+        
         # Initialize PyOWM
         owm = pyowm.OWM(OPENWEATHERMAP_API_KEY)
         mgr = owm.weather_manager()
         
         # Get weather for location
-        observation = mgr.weather_at_place(location)
+        observation = mgr.weather_at_place(normalized_location)
         weather = observation.weather
         
         # Get temperature in Celsius and Fahrenheit
