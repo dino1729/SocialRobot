@@ -13,6 +13,43 @@ import numpy as np
 import pyaudio
 
 
+class _DictWithAttrs:
+    """Wrapper to make a dict accessible via both keys and attributes.
+
+    Used to wrap cached voice prompt dicts so they can be accessed like
+    model output objects (with .past_key_values etc.)
+    """
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def __getattr__(self, name: str):
+        if name.startswith('_'):
+            return object.__getattribute__(self, name)
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __setitem__(self, key, value):
+        self._data[key] = value
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def keys(self):
+        return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def items(self):
+        return self._data.items()
+
+
 class VibeVoiceTTS:
     """Generate audio using Microsoft VibeVoice with GPU acceleration.
 
@@ -130,6 +167,10 @@ class VibeVoiceTTS:
                 else:
                     print(f"-> GPU (CUDA) available: {torch.cuda.get_device_name(0)}")
                     print(f"-> CUDA version: {torch.version.cuda}")
+                    # Jetson devices need CUDA memory caching disabled
+                    gpu_name = torch.cuda.get_device_name(0).lower()
+                    if "orin" in gpu_name or "jetson" in gpu_name:
+                        os.environ.setdefault("PYTORCH_NO_CUDA_MEMORY_CACHING", "1")
 
         except ImportError as e:
             raise ImportError("PyTorch not installed. Run: pip install torch") from e
@@ -150,9 +191,21 @@ class VibeVoiceTTS:
             print("   cd VibeVoice && pip install -e .")
             raise ImportError("VibeVoice not installed.") from e
 
+    def _is_jetson(self) -> bool:
+        """Check if running on NVIDIA Jetson platform."""
+        try:
+            gpu_name = self._torch.cuda.get_device_name(0).lower()
+            return "orin" in gpu_name or "jetson" in gpu_name
+        except Exception:
+            return False
+
     def _get_dtype_and_attention(self) -> tuple:
         """Get appropriate dtype and attention implementation for device."""
         if self.device == "cuda":
+            # Jetson devices prefer float16 over bfloat16
+            if self._is_jetson():
+                print("-> Detected Jetson platform, using float16 for optimal performance")
+                return self._torch.float16, "sdpa"
             try:
                 import flash_attn  # noqa: F401
                 print("-> Using Flash Attention 2 for optimal GPU performance")
@@ -189,6 +242,7 @@ class VibeVoiceTTS:
                 torch_dtype=dtype,
                 device_map=device_map,
                 attn_implementation=attn_impl,
+                low_cpu_mem_usage=True,
             )
 
             if self.device == "mps":
@@ -236,10 +290,50 @@ class VibeVoiceTTS:
                     map_location=target_device,
                     weights_only=False,
                 )
+                # Convert voice prompt tensors to model dtype for consistency
+                if self._voice_prompt is not None and self._model is not None:
+                    model_dtype = next(self._model.parameters()).dtype
+                    self._voice_prompt = self._convert_prompt_dtype(
+                        self._voice_prompt, model_dtype, target_device
+                    )
                 print(f"-> Loaded voice prompt: {os.path.basename(voice_path)}")
             except Exception as e:
                 print(f"-> Warning: Failed to load voice prompt: {e}")
                 self._voice_prompt = None
+
+    def _convert_prompt_dtype(self, prompt, dtype, device):
+        """Recursively convert prompt tensors to specified dtype and device."""
+        if isinstance(prompt, self._torch.Tensor):
+            if prompt.is_floating_point():
+                return prompt.to(dtype=dtype, device=device)
+            else:
+                return prompt.to(device=device)
+        elif isinstance(prompt, dict):
+            # Check if this is an outputs-like dict that needs attribute access
+            if 'last_hidden_state' in prompt and 'past_key_values' in prompt:
+                # This is a model output dict - convert and wrap for attribute access
+                converted = {}
+                for k, v in prompt.items():
+                    converted[k] = self._convert_prompt_dtype(v, dtype, device)
+                return _DictWithAttrs(converted)
+            else:
+                return {k: self._convert_prompt_dtype(v, dtype, device) for k, v in prompt.items()}
+        elif isinstance(prompt, (list, tuple)):
+            converted = [self._convert_prompt_dtype(v, dtype, device) for v in prompt]
+            return type(prompt)(converted)
+        else:
+            # Handle DynamicCache and similar objects with key_cache/value_cache
+            if hasattr(prompt, 'key_cache') and hasattr(prompt, 'value_cache'):
+                for i in range(len(prompt.key_cache)):
+                    if prompt.key_cache[i].is_floating_point():
+                        prompt.key_cache[i] = prompt.key_cache[i].to(dtype=dtype, device=device)
+                    else:
+                        prompt.key_cache[i] = prompt.key_cache[i].to(device=device)
+                    if prompt.value_cache[i].is_floating_point():
+                        prompt.value_cache[i] = prompt.value_cache[i].to(dtype=dtype, device=device)
+                    else:
+                        prompt.value_cache[i] = prompt.value_cache[i].to(device=device)
+            return prompt
 
     def synthesize(self, text: str) -> np.ndarray:
         """Synthesize speech from text.
