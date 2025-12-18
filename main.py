@@ -22,12 +22,14 @@ ADDITIONAL OPTIONS:
   --stt-engine {faster-whisper,openai-whisper}  STT engine (default: faster-whisper)
   --device {cpu,cuda}     Device for STT (auto-detected if not specified)
   --compute-type          Compute type for faster-whisper: int8, float16, float32 (auto-detected)
-  --tts-engine {kokoro,piper,chatterbox}  TTS engine to use (default: kokoro)
+  --tts-engine {kokoro,piper,chatterbox,vibevoice}  TTS engine to use (default: kokoro)
   --tts-gpu               Enable GPU acceleration for TTS
   --tts-voice VOICE       Voice for Kokoro TTS (e.g., af_bella, af_sarah)
   --tts-speed SPEED       Speech speed for Kokoro TTS (default: 1.0)
   --voice NAME            Voice character name for Chatterbox (e.g., rick_sanchez, morgan_freeman)
                           Auto-loads voice from voices/{name}.wav and persona from personas/{name}.txt
+  --vibevoice-speaker NAME  Speaker for VibeVoice TTS (default: Carter)
+                          Available: Carter, Bria, Alex, Dora, Nova, Sol, Aria, Isla, Eva, Maya, Raj
   --wakeword-threshold    Wake word detection threshold 0.0-1.0 (default: 0.5)
   --no-memory-monitor     Disable periodic memory usage stats
   --monitor-interval SEC  Memory monitor update interval in seconds (default: 60)
@@ -57,6 +59,12 @@ EXAMPLES:
 
   # Chatterbox TTS with Morgan Freeman voice
   python main.py --tts-engine chatterbox --voice morgan_freeman
+
+  # VibeVoice TTS with GPU acceleration (recommended for speed)
+  python main.py --tts-engine vibevoice --tts-gpu
+
+  # VibeVoice with different speaker
+  python main.py --tts-engine vibevoice --vibevoice-speaker Bria --tts-gpu
 
 ENVIRONMENT VARIABLES (from .env file):
   OLLAMA_URL          - Ollama API endpoint (default: http://localhost:11434/api/chat)
@@ -1027,9 +1035,10 @@ def main(
     tts_voice: Optional[str] = None,
     tts_speed: float = 1.0,
     voice: Optional[str] = None,
+    vibevoice_speaker: Optional[str] = None,
 ) -> None:
     """Main entry point for the voice assistant.
-    
+
     Args:
         use_wakeword: Enable wake word detection instead of continuous listening
         llm_backend: 'ollama' (local) or 'litellm' (online API)
@@ -1040,11 +1049,12 @@ def main(
         device: Device for STT ('cpu' or 'cuda', auto-detected if None)
         compute_type: Compute type for STT ('int8', 'float16', 'float32', auto if None)
         wakeword_threshold: Wake word detection threshold 0.0-1.0
-        tts_engine: TTS engine to use ('kokoro', 'piper', or 'chatterbox')
+        tts_engine: TTS engine to use ('kokoro', 'piper', 'chatterbox', or 'vibevoice')
         tts_use_gpu: Enable GPU for TTS
         tts_voice: Voice for Kokoro TTS
         tts_speed: Speech speed for Kokoro TTS
         voice: Voice character name for Chatterbox (loads voice and persona automatically)
+        vibevoice_speaker: Speaker name for VibeVoice TTS (default: Carter)
     """
     # Log configuration at debug level
     logger.debug("=" * 60)
@@ -1205,6 +1215,8 @@ def main(
         tts_kwargs["speed"] = tts_speed
     elif tts_engine == "chatterbox":
         tts_kwargs["voice_path"] = voice_path
+    elif tts_engine == "vibevoice":
+        tts_kwargs["speaker"] = vibevoice_speaker or "Carter"
     tts_model = create_tts_engine(engine=tts_engine, **tts_kwargs)
     
     # State variables
@@ -1469,7 +1481,13 @@ TTS/STT Examples:
   
   # Chatterbox TTS with Morgan Freeman voice (narration style)
   python main.py --tts-engine chatterbox --voice morgan_freeman
-  
+
+  # VibeVoice TTS with GPU (recommended for ~300ms latency)
+  python main.py --tts-engine vibevoice --tts-gpu
+
+  # VibeVoice with different speaker
+  python main.py --tts-engine vibevoice --vibevoice-speaker Bria --tts-gpu
+
   # Force CPU for STT (if GPU fails with cuDNN errors)
   python main.py --device cpu
   
@@ -1548,7 +1566,7 @@ Equivalent to old scripts:
     parser.add_argument(
         "--tts-engine",
         type=str,
-        choices=["kokoro", "piper", "chatterbox"],
+        choices=["kokoro", "piper", "chatterbox", "vibevoice"],
         default="kokoro",
         help="TTS engine to use (default: kokoro)",
     )
@@ -1580,7 +1598,15 @@ Equivalent to old scripts:
         help="Voice character name for Chatterbox TTS (e.g., rick_sanchez, morgan_freeman). "
              "Auto-loads voice WAV from voices/ and persona from personas/",
     )
-    
+
+    parser.add_argument(
+        "--vibevoice-speaker",
+        type=str,
+        default=None,
+        help="Speaker for VibeVoice TTS (default: Carter). "
+             "Available: Carter, Bria, Alex, Dora, Nova, Sol, Aria, Isla, Eva, Maya, Raj",
+    )
+
     # Monitoring options
     parser.add_argument(
         "--no-memory-monitor",
@@ -1621,5 +1647,6 @@ Equivalent to old scripts:
         tts_voice=args.tts_voice,
         tts_speed=args.tts_speed,
         voice=args.voice,
+        vibevoice_speaker=args.vibevoice_speaker,
     )
 

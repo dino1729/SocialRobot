@@ -26,3 +26,15 @@ diffusers==0.29.0
 pykakasi==2.3.0
 resemble-perth==1.0.1
 # pkuseg==0.0.25  # Install separately with: pip install pkuseg==0.0.25 --no-build-isolation
+
+# VibeVoice TTS (Microsoft's realtime streaming TTS with ~300ms latency)
+# Installation:
+#   git clone https://github.com/microsoft/VibeVoice.git
+#   cd VibeVoice && pip install -e .
+#
+# Required dependencies (automatically installed with VibeVoice):
+accelerate==1.6.0
+transformers==4.51.3
+flash-attn  # For GPU acceleration (requires CUDA)
+# Note: vibevoice package itself must be installed from git (pip install -e .)
+# The model will be downloaded from HuggingFace: microsoft/VibeVoice-Realtime-0.5B

@@ -17,6 +17,7 @@ class TTSEngine(str, Enum):
     KOKORO = "kokoro"
     PIPER = "piper"
     CHATTERBOX = "chatterbox"
+    VIBEVOICE = "vibevoice"
 
 
 def create_stt_engine(
@@ -85,50 +86,64 @@ def create_tts_engine(
     voice: Optional[str] = None,
     speed: float = 1.0,
     voice_path: Optional[str] = None,
+    speaker: Optional[str] = None,
+    cfg_scale: float = 1.5,
     **kwargs: Any,
 ) -> Any:
     """Factory function to create TTS engine.
-    
+
     Args:
         engine: TTS engine to use
         use_gpu: Enable GPU acceleration
         voice: Voice to use (engine-specific, for Kokoro)
         speed: Speech speed multiplier (for Kokoro)
         voice_path: Path to voice WAV file for zero-shot cloning (for Chatterbox)
+        speaker: Speaker name for VibeVoice (default: Carter)
+        cfg_scale: Classifier-free guidance scale for VibeVoice (default: 1.5)
         **kwargs: Additional engine-specific arguments
-        
+
     Returns:
         TTS engine instance
     """
     engine = TTSEngine(engine)
-    
+
     if engine == TTSEngine.KOKORO:
         from audio.tts import KokoroTTS
-        
+
         return KokoroTTS(
             voice=voice or "af_bella",
             speed=speed,
             use_gpu=use_gpu,
             **kwargs,
         )
-    
+
     elif engine == TTSEngine.PIPER:
         from audio.tts_piper import PiperTTS
-        
+
         return PiperTTS(
             use_gpu=use_gpu,
             **kwargs,
         )
-    
+
     elif engine == TTSEngine.CHATTERBOX:
         from audio.tts_chatterbox import ChatterboxTTS
-        
+
         return ChatterboxTTS(
             voice_path=voice_path,
             use_gpu=use_gpu,
             **kwargs,
         )
-    
+
+    elif engine == TTSEngine.VIBEVOICE:
+        from audio.tts_vibevoice import VibeVoiceTTS
+
+        return VibeVoiceTTS(
+            speaker=speaker or "Carter",
+            use_gpu=use_gpu,
+            cfg_scale=cfg_scale,
+            **kwargs,
+        )
+
     else:
         raise ValueError(f"Unknown TTS engine: {engine}")
 
