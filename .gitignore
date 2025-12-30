@@ -13,3 +13,4 @@ voices/
 audio_output/
 create_audio.py
 .bot.pid
+audio/VibeVoice/
