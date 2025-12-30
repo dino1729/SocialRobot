@@ -184,8 +184,8 @@ if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
     source "$SCRIPT_DIR/venv/bin/activate"
 fi
 
-# Start the bot in the background
-nohup python3 main.py $MAIN_ARGS "$@" > "$LOG_FILE" 2>&1 &
+# Start the bot in the background with unbuffered output
+PYTHONUNBUFFERED=1 nohup python3 -u main.py $MAIN_ARGS "$@" > "$LOG_FILE" 2>&1 &
 BOT_PID=$!
 
 # Save PID

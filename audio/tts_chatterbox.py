@@ -15,10 +15,13 @@ import pyaudio
 
 class ChatterboxTTS:
     """Generate audio using Chatterbox TTS with zero-shot voice cloning.
-    
+
     Chatterbox TTS enables high-quality voice cloning from a short audio sample.
     Simply provide a WAV file of the target voice and it will synthesize speech
     in that voice style.
+
+    The turbo model (350M params) uses a one-step mel decoder for faster inference,
+    making it ideal for CPU usage and real-time voice agents.
     """
 
     def __init__(
@@ -26,58 +29,160 @@ class ChatterboxTTS:
         voice_path: Optional[str] = None,
         device: str = "cpu",
         use_gpu: bool = False,
+        use_turbo: bool = True,
     ) -> None:
         """Initialize Chatterbox TTS.
-        
+
         Args:
             voice_path: Path to voice reference WAV file for zero-shot cloning.
                        If None, uses Chatterbox's default voice.
             device: Device to use ('cpu' or 'cuda'). Overridden by use_gpu if True.
             use_gpu: If True, forces CUDA device. Takes precedence over device param.
+            use_turbo: If True, uses the faster turbo model (recommended for CPU).
         """
         self.voice_path = voice_path
         self.device = "cuda" if use_gpu else device
+        self.use_turbo = use_turbo
         self.sample_rate = 24000  # Chatterbox default sample rate
-        
+        self._temp_voice_path = None  # Preprocessed voice file
+        self._voice_prepared = False  # Whether voice conditionals are pre-computed
+
         # Validate voice path if provided
         if self.voice_path and not os.path.exists(self.voice_path):
             print(f"-> Warning: Voice file not found: {self.voice_path}")
             self.voice_path = None
-        
+
         # Lazy-load model and torchaudio
         self._model = None
         self._torchaudio = None
         self._ChatterboxModel = None
-        
-        # Try to import Chatterbox
+        self._torch = None
+
+        # Try to import Chatterbox (turbo or standard model)
         try:
-            from chatterbox.tts import ChatterboxTTS as ChatterboxModel
+            if self.use_turbo:
+                from chatterbox.tts_turbo import ChatterboxTurboTTS as ChatterboxModel
+                print("-> Chatterbox Turbo TTS library loaded successfully")
+            else:
+                from chatterbox.tts import ChatterboxTTS as ChatterboxModel
+                print("-> Chatterbox TTS library loaded successfully")
+            import torch
             import torchaudio
             self._ChatterboxModel = ChatterboxModel
             self._torchaudio = torchaudio
-            print("-> Chatterbox TTS library loaded successfully")
+            self._torch = torch
         except ImportError as e:
             print(f"-> Error: Chatterbox TTS not installed. Install with:")
-            print("   pip install chatterbox-tts torchaudio torchcodec")
+            print("   pip install chatterbox-tts torchaudio")
             raise ImportError(
-                "Chatterbox TTS not installed. Run: pip install chatterbox-tts torchaudio torchcodec"
+                "Chatterbox TTS not installed. Run: pip install chatterbox-tts torchaudio"
             ) from e
-        
+
+        # Preprocess voice file if provided (convert to float32 mono for compatibility)
+        if self.voice_path:
+            self._preprocess_voice_file()
+
         # Initialize the model
         self._initialize_model()
+
+    def _preprocess_voice_file(self) -> None:
+        """Preprocess voice file to ensure float32 mono format for Chatterbox compatibility."""
+        import soundfile as sf
+
+        try:
+            # Load audio file
+            data, sr = sf.read(self.voice_path, dtype='float32')
+
+            # Convert stereo to mono if needed
+            if len(data.shape) > 1:
+                data = data.mean(axis=1).astype(np.float32)
+
+            # Create temp file with preprocessed audio
+            self._temp_voice_path = tempfile.NamedTemporaryFile(
+                suffix='.wav', delete=False, prefix='chatterbox_voice_'
+            ).name
+            sf.write(self._temp_voice_path, data, sr, subtype='FLOAT')
+            print(f"-> Preprocessed voice file: {sr}Hz, {len(data)/sr:.1f}s, float32 mono")
+
+        except Exception as e:
+            print(f"-> Warning: Could not preprocess voice file: {e}")
+            self._temp_voice_path = None
+
+    def _prepare_voice_conditionals(self) -> None:
+        """Pre-compute voice conditionals with proper dtype handling."""
+        if not self.voice_path or self._model is None:
+            return
+
+        try:
+            import librosa
+
+            voice_file = self._temp_voice_path or self.voice_path
+
+            # Monkey-patch librosa.load to return float32
+            original_librosa_load = librosa.load
+            def float32_librosa_load(path, **kwargs):
+                data, rate = original_librosa_load(path, **kwargs)
+                return data.astype(np.float32), rate
+
+            # Monkey-patch librosa.resample to return float32
+            original_librosa_resample = librosa.resample
+            def float32_librosa_resample(y, **kwargs):
+                result = original_librosa_resample(y, **kwargs)
+                return result.astype(np.float32)
+
+            # Monkey-patch torch.from_numpy to convert float64 to float32
+            original_from_numpy = self._torch.from_numpy
+            def float32_from_numpy(arr):
+                if hasattr(arr, 'dtype') and arr.dtype == np.float64:
+                    arr = arr.astype(np.float32)
+                return original_from_numpy(arr)
+
+            # Monkey-patch torch.tensor to convert float64 to float32
+            original_tensor = self._torch.tensor
+            def float32_tensor(data, *args, **kwargs):
+                if isinstance(data, np.ndarray) and data.dtype == np.float64:
+                    data = data.astype(np.float32)
+                return original_tensor(data, *args, **kwargs)
+
+            # Apply patches
+            librosa.load = float32_librosa_load
+            librosa.resample = float32_librosa_resample
+            self._torch.from_numpy = float32_from_numpy
+            self._torch.tensor = float32_tensor
+
+            try:
+                self._model.prepare_conditionals(voice_file)
+                self._voice_prepared = True
+                print(f"-> Voice conditionals prepared successfully")
+            finally:
+                # Restore original functions
+                librosa.load = original_librosa_load
+                librosa.resample = original_librosa_resample
+                self._torch.from_numpy = original_from_numpy
+                self._torch.tensor = original_tensor
+
+        except Exception as e:
+            print(f"-> Warning: Could not prepare voice conditionals: {e}")
+            self._voice_prepared = False
 
     def _initialize_model(self) -> None:
         """Initialize the Chatterbox model."""
         if self._model is not None:
             return
-        
-        print(f"-> Loading Chatterbox TTS model on device: {self.device}")
+
+        model_type = "Turbo" if self.use_turbo else "Standard"
+        print(f"-> Loading Chatterbox {model_type} TTS model on device: {self.device}")
         try:
             self._model = self._ChatterboxModel.from_pretrained(device=self.device)
             self.sample_rate = self._model.sr
-            
+
             voice_info = f" with voice: {self.voice_path}" if self.voice_path else " (default voice)"
-            print(f"-> Using Chatterbox TTS for speech synthesis on {self.device.upper()}{voice_info}.")
+            print(f"-> Using Chatterbox {model_type} TTS for speech synthesis on {self.device.upper()}{voice_info}.")
+
+            # Pre-compute voice conditionals if voice file provided
+            if self.voice_path:
+                self._prepare_voice_conditionals()
+
         except Exception as e:
             print(f"-> Error initializing Chatterbox TTS: {e}")
             raise
@@ -149,8 +254,13 @@ class ChatterboxTTS:
             
             try:
                 # Generate audio with or without voice cloning
-                if self.voice_path:
-                    wav_tensor = self._model.generate(chunk, audio_prompt_path=self.voice_path)
+                # If conditionals are pre-computed, don't pass audio_prompt_path
+                if self._voice_prepared:
+                    wav_tensor = self._model.generate(chunk)
+                elif self.voice_path:
+                    # Fallback to file path (may have dtype issues)
+                    voice_file = self._temp_voice_path or self.voice_path
+                    wav_tensor = self._model.generate(chunk, audio_prompt_path=voice_file)
                 else:
                     wav_tensor = self._model.generate(chunk)
                 

@@ -88,6 +88,7 @@ def create_tts_engine(
     voice_path: Optional[str] = None,
     speaker: Optional[str] = None,
     cfg_scale: float = 1.5,
+    use_turbo: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Factory function to create TTS engine.
@@ -100,6 +101,7 @@ def create_tts_engine(
         voice_path: Path to voice WAV file for zero-shot cloning (for Chatterbox)
         speaker: Speaker name for VibeVoice (default: Carter)
         cfg_scale: Classifier-free guidance scale for VibeVoice (default: 1.5)
+        use_turbo: Use Chatterbox turbo model for faster inference (default: True)
         **kwargs: Additional engine-specific arguments
 
     Returns:
@@ -131,6 +133,7 @@ def create_tts_engine(
         return ChatterboxTTS(
             voice_path=voice_path,
             use_gpu=use_gpu,
+            use_turbo=use_turbo,
             **kwargs,
         )
 
