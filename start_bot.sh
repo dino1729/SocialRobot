@@ -199,6 +199,12 @@ else
         echo -e "${YELLOW}Warning: Audio devices not properly configured${NC}"
         echo -e "${YELLOW}Run ./set_audio_defaults.sh to configure${NC}"
     fi
+
+    # Set microphone gain to reduce background noise for VAD
+    MIC_VOLUME="50%"
+    if pactl set-source-volume @DEFAULT_SOURCE@ "$MIC_VOLUME" 2>/dev/null; then
+        echo -e "${GREEN}✓ Microphone gain set to $MIC_VOLUME${NC}"
+    fi
 fi
 echo ""
 

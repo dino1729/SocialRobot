@@ -115,6 +115,11 @@ ENVIRONMENT VARIABLES (from .env file):
   VAD_ACTIVATION_RATIO - Speech start threshold 0.0-1.0 (default: 0.6)
   VAD_DEACTIVATION_RATIO - Speech end threshold 0.0-1.0 (default: 0.85)
 
+  # Conversation History Management
+  MAX_CONVERSATION_MESSAGES - Max messages to keep in history (default: 20, 0=unlimited)
+  MAX_CONVERSATION_TOKENS   - Max estimated tokens before auto-reset (default: 3500, 0=disabled)
+  CONVERSATION_TIMEOUT_MINUTES - Minutes of inactivity before auto-reset (default: 10, 0=disabled)
+
   # Internet Tools
   FIRECRAWL_URL       - Firecrawl server URL for web tools (default: http://localhost:3002)
   OPENWEATHERMAP_API_KEY - API key for weather tool (optional)
@@ -161,6 +166,22 @@ try:
 except:
     pass
 
+# =============================================================================
+# Suppress Python Warnings (ONNX Runtime, webrtcvad, etc.)
+# =============================================================================
+
+import warnings
+
+# Suppress ONNX Runtime warning about missing CUDA provider (harmless on CPU-only systems)
+warnings.filterwarnings("ignore", message=".*Specified provider.*is not in available provider names.*")
+
+# Suppress pkg_resources deprecation warning from webrtcvad
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
+# Disable tqdm progress bars globally (faster-whisper uses them during transcription)
+# This can be overridden by setting TQDM_DISABLE=0 in the environment
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 
 @contextmanager
 def suppress_stderr():
@@ -205,6 +226,10 @@ def setup_logging(debug: bool = False) -> logging.Logger:
         Configured logger instance
     """
     level = logging.DEBUG if debug else logging.INFO
+    
+    # Re-enable tqdm progress bars in debug mode
+    if debug:
+        os.environ["TQDM_DISABLE"] = "0"
     
     # Create formatter with timestamps
     formatter = logging.Formatter(
@@ -278,6 +303,7 @@ DEFAULT_ENABLE_MEMORY_MONITOR = os.getenv("ENABLE_MEMORY_MONITOR", "true").lower
 DEFAULT_MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
 DEFAULT_AUTO_CALIBRATE = os.getenv("AUTO_CALIBRATE", "true").lower() in ("true", "1", "yes")
 DEFAULT_CALIBRATION_SECONDS = float(os.getenv("CALIBRATION_SECONDS", "2.0"))
+DEFAULT_FOLLOWUP_WINDOW_SECONDS = float(os.getenv("FOLLOWUP_WINDOW_SECONDS", "4.0"))
 
 # VAD (Voice Activity Detection) configuration
 DEFAULT_USE_VAD = os.getenv("USE_VAD", "true").lower() in ("true", "1", "yes")
@@ -288,6 +314,11 @@ DEFAULT_VAD_PADDING_DURATION_MS = int(os.getenv("VAD_PADDING_DURATION_MS", "360"
 DEFAULT_VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
 DEFAULT_VAD_ACTIVATION_RATIO = float(os.getenv("VAD_ACTIVATION_RATIO", "0.6"))
 DEFAULT_VAD_DEACTIVATION_RATIO = float(os.getenv("VAD_DEACTIVATION_RATIO", "0.85"))
+
+# Conversation history management
+DEFAULT_MAX_CONVERSATION_MESSAGES = int(os.getenv("MAX_CONVERSATION_MESSAGES", "20"))
+DEFAULT_MAX_CONVERSATION_TOKENS = int(os.getenv("MAX_CONVERSATION_TOKENS", "3500"))
+DEFAULT_CONVERSATION_TIMEOUT_MINUTES = int(os.getenv("CONVERSATION_TIMEOUT_MINUTES", "10"))
 
 
 # =============================================================================
@@ -701,7 +732,9 @@ def calibrate_audio_parameters(
     }
     
     try:
-        pa = pyaudio.PyAudio()
+        # Suppress JACK "cannot connect to server" warnings during PyAudio init
+        with suppress_stderr():
+            pa = pyaudio.PyAudio()
         
         try:
             stream = pa.open(
@@ -803,7 +836,9 @@ class WakeWordDetector:
         model_paths = [str(models_dir / f"{model}.onnx") for model in wakeword_models]
         self.oww_model = Model(wakeword_model_paths=model_paths)
         
-        self.audio = pyaudio.PyAudio()
+        # Suppress JACK "cannot connect to server" warnings during PyAudio init
+        with suppress_stderr():
+            self.audio = pyaudio.PyAudio()
         self.stream: Optional[Any] = None
         self.is_running = False
         self.is_paused = False
@@ -933,11 +968,253 @@ class WakeWordDetector:
 
 
 # =============================================================================
+# Conversation History Management
+# =============================================================================
+
+class ConversationManager:
+    """Manages conversation history with automatic truncation and timeout reset.
+    
+    Features:
+    - Keeps conversation history within a maximum message count
+    - Estimates token usage and resets when approaching limits
+    - Auto-resets conversation after a configurable timeout period
+    - Preserves system prompt across resets
+    
+    Configuration (from environment variables):
+    - MAX_CONVERSATION_MESSAGES: Max messages to keep (default: 20)
+    - MAX_CONVERSATION_TOKENS: Max estimated tokens before reset (default: 3500)
+    - CONVERSATION_TIMEOUT_MINUTES: Minutes of inactivity before reset (default: 10)
+    """
+    
+    def __init__(
+        self,
+        system_prompt: Optional[str] = None,
+        max_messages: int = DEFAULT_MAX_CONVERSATION_MESSAGES,
+        max_tokens: int = DEFAULT_MAX_CONVERSATION_TOKENS,
+        timeout_minutes: int = DEFAULT_CONVERSATION_TIMEOUT_MINUTES,
+    ) -> None:
+        """Initialize conversation manager.
+        
+        Args:
+            system_prompt: Optional system prompt to preserve across resets
+            max_messages: Maximum messages to keep (0 = unlimited)
+            max_tokens: Maximum estimated tokens before reset (0 = disabled)
+            timeout_minutes: Minutes of inactivity before reset (0 = disabled)
+        """
+        self.system_prompt = system_prompt
+        self.max_messages = max_messages
+        self.max_tokens = max_tokens
+        self.timeout_minutes = timeout_minutes
+        self.conversation_history: list[dict] = []
+        self.last_interaction_time: float = time.time()
+        
+        # Initialize with system prompt if provided
+        if system_prompt:
+            self.conversation_history.append({
+                "role": "system",
+                "content": system_prompt
+            })
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for a text string.
+        
+        Uses a simple heuristic: ~4 characters per token on average.
+        This is a rough approximation that works reasonably well for English text.
+        
+        Args:
+            text: Text to estimate tokens for
+            
+        Returns:
+            Estimated token count
+        """
+        return len(text) // 4 + 1
+    
+    def _get_total_tokens(self) -> int:
+        """Calculate total estimated tokens in conversation history.
+        
+        Returns:
+            Total estimated tokens across all messages
+        """
+        total = 0
+        for msg in self.conversation_history:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += self._estimate_tokens(content)
+        return total
+    
+    def _should_reset_for_timeout(self) -> bool:
+        """Check if conversation should be reset due to inactivity timeout.
+        
+        Returns:
+            True if timeout has elapsed since last interaction
+        """
+        if self.timeout_minutes <= 0:
+            return False
+        
+        elapsed_minutes = (time.time() - self.last_interaction_time) / 60
+        return elapsed_minutes >= self.timeout_minutes
+    
+    def _should_reset_for_tokens(self) -> bool:
+        """Check if conversation should be reset due to token limit.
+        
+        Returns:
+            True if estimated tokens exceed the configured maximum
+        """
+        if self.max_tokens <= 0:
+            return False
+        
+        return self._get_total_tokens() >= self.max_tokens
+    
+    def _get_non_system_messages(self) -> list[dict]:
+        """Get all messages except the system prompt.
+        
+        Returns:
+            List of non-system messages
+        """
+        return [msg for msg in self.conversation_history if msg.get("role") != "system"]
+    
+    def _truncate_history(self) -> None:
+        """Truncate conversation history to max_messages limit.
+        
+        Preserves the system prompt (if any) and keeps the most recent messages.
+        Always keeps messages in pairs (user + assistant) when possible.
+        """
+        if self.max_messages <= 0:
+            return
+        
+        non_system = self._get_non_system_messages()
+        
+        if len(non_system) <= self.max_messages:
+            return
+        
+        # Keep only the most recent messages
+        messages_to_keep = non_system[-self.max_messages:]
+        
+        # Rebuild history with system prompt first
+        self.conversation_history = []
+        if self.system_prompt:
+            self.conversation_history.append({
+                "role": "system",
+                "content": self.system_prompt
+            })
+        self.conversation_history.extend(messages_to_keep)
+        
+        logger.debug(f"Truncated conversation history to {len(messages_to_keep)} messages")
+    
+    def reset_conversation(self, reason: str = "manual") -> None:
+        """Reset conversation history, preserving only the system prompt.
+        
+        Args:
+            reason: Reason for reset (for logging)
+        """
+        old_count = len(self._get_non_system_messages())
+        self.conversation_history = []
+        
+        if self.system_prompt:
+            self.conversation_history.append({
+                "role": "system",
+                "content": self.system_prompt
+            })
+        
+        self.last_interaction_time = time.time()
+        logger.info(f"Conversation reset ({reason}). Cleared {old_count} messages.")
+    
+    def check_and_manage_history(self) -> None:
+        """Check limits and manage conversation history before each query.
+        
+        This should be called before adding a new user message.
+        It will:
+        1. Reset if timeout has elapsed
+        2. Reset if token limit exceeded
+        3. Truncate if message count exceeded
+        """
+        # Check timeout first
+        if self._should_reset_for_timeout():
+            elapsed = (time.time() - self.last_interaction_time) / 60
+            self.reset_conversation(f"timeout after {elapsed:.1f} minutes")
+            return
+        
+        # Check token limit
+        if self._should_reset_for_tokens():
+            tokens = self._get_total_tokens()
+            self.reset_conversation(f"token limit reached (~{tokens} tokens)")
+            return
+        
+        # Truncate if needed
+        self._truncate_history()
+    
+    def add_user_message(self, content: str) -> None:
+        """Add a user message to conversation history.
+        
+        Args:
+            content: User message content
+        """
+        self.check_and_manage_history()
+        self.conversation_history.append({
+            "role": "user",
+            "content": content
+        })
+        self.last_interaction_time = time.time()
+    
+    def add_assistant_message(self, content: str) -> None:
+        """Add an assistant message to conversation history.
+        
+        Args:
+            content: Assistant message content
+        """
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": content
+        })
+        self.last_interaction_time = time.time()
+    
+    def add_tool_message(self, content: str, tool_call_id: Optional[str] = None) -> None:
+        """Add a tool result message to conversation history.
+        
+        Args:
+            content: Tool result content
+            tool_call_id: Optional tool call ID (for OpenAI format)
+        """
+        msg = {
+            "role": "tool",
+            "content": content
+        }
+        if tool_call_id:
+            msg["tool_call_id"] = tool_call_id
+        self.conversation_history.append(msg)
+    
+    def add_raw_message(self, message: dict) -> None:
+        """Add a raw message dict to conversation history.
+        
+        Used for tool call messages that have special structure.
+        
+        Args:
+            message: Message dict to add
+        """
+        self.conversation_history.append(message)
+        self.last_interaction_time = time.time()
+    
+    def get_messages(self) -> list[dict]:
+        """Get the current conversation history.
+        
+        Returns:
+            List of message dicts
+        """
+        return self.conversation_history
+
+
+# =============================================================================
 # LLM Clients
 # =============================================================================
 
 class OllamaClient:
-    """Simple Ollama client for basic chat (no tool support)."""
+    """Simple Ollama client for basic chat (no tool support).
+    
+    Includes automatic conversation history management with:
+    - Message count limiting (MAX_CONVERSATION_MESSAGES)
+    - Token-based reset (MAX_CONVERSATION_TOKENS)
+    - Timeout-based reset (CONVERSATION_TIMEOUT_MINUTES)
+    """
     
     def __init__(
         self,
@@ -949,24 +1226,20 @@ class OllamaClient:
         self.url = url
         self.model = model
         self.stream = stream
-        self.conversation_history: list[dict] = []
-        
-        if system_prompt:
-            self.conversation_history.append({
-                "role": "system",
-                "content": system_prompt
-            })
+        self._conversation = ConversationManager(system_prompt=system_prompt)
+    
+    @property
+    def conversation_history(self) -> list[dict]:
+        """Get conversation history (for compatibility)."""
+        return self._conversation.get_messages()
     
     def query(self, user_text: str) -> str:
         """Send a query to Ollama and return the response."""
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_text
-        })
+        self._conversation.add_user_message(user_text)
         
         payload = {
             "model": self.model,
-            "messages": self.conversation_history,
+            "messages": self._conversation.get_messages(),
             "stream": self.stream,
         }
         
@@ -983,20 +1256,14 @@ class OllamaClient:
                             chunk = data["message"].get("content", "")
                             full_response += chunk
                 
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": full_response
-                })
+                self._conversation.add_assistant_message(full_response)
                 return full_response.strip()
             else:
                 response = requests.post(self.url, json=payload, timeout=120)
                 if response.status_code == 200:
                     data = response.json()
                     content = data.get("message", {}).get("content", "")
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": content
-                    })
+                    self._conversation.add_assistant_message(content)
                     return content.strip()
                 else:
                     return "Sorry, I encountered an error."
@@ -1006,7 +1273,13 @@ class OllamaClient:
 
 
 class OllamaClientWithTools:
-    """Enhanced Ollama client that supports tool calling for internet features."""
+    """Enhanced Ollama client that supports tool calling for internet features.
+    
+    Includes automatic conversation history management with:
+    - Message count limiting (MAX_CONVERSATION_MESSAGES)
+    - Token-based reset (MAX_CONVERSATION_TOKENS)
+    - Timeout-based reset (CONVERSATION_TIMEOUT_MINUTES)
+    """
     
     def __init__(
         self,
@@ -1018,14 +1291,12 @@ class OllamaClientWithTools:
         self.url = url
         self.model = model
         self.stream = stream
-        self.system_prompt = system_prompt
-        self.conversation_history: list[dict] = []
-        
-        if system_prompt:
-            self.conversation_history.append({
-                "role": "system",
-                "content": system_prompt
-            })
+        self._conversation = ConversationManager(system_prompt=system_prompt)
+    
+    @property
+    def conversation_history(self) -> list[dict]:
+        """Get conversation history (for compatibility)."""
+        return self._conversation.get_messages()
     
     def query(self, user_text: str) -> str:
         """Query without tools (for compatibility)."""
@@ -1035,10 +1306,7 @@ class OllamaClientWithTools:
         """Query Ollama with tool support, executing tools as needed."""
         from tools import execute_tool_call
         
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_text
-        })
+        self._conversation.add_user_message(user_text)
         
         max_iterations = 5
         iteration = 0
@@ -1048,7 +1316,7 @@ class OllamaClientWithTools:
             
             payload = {
                 "model": self.model,
-                "messages": self.conversation_history,
+                "messages": self._conversation.get_messages(),
                 "stream": self.stream,
                 "tools": tools if tools else None
             }
@@ -1066,7 +1334,7 @@ class OllamaClientWithTools:
                 
                 if tool_calls:
                     print(f"🔧 Model requested {len(tool_calls)} tool call(s)")
-                    self.conversation_history.append(message)
+                    self._conversation.add_raw_message(message)
                     
                     for tool_call in tool_calls:
                         function = tool_call.get("function", {})
@@ -1076,17 +1344,11 @@ class OllamaClientWithTools:
                         print(f"   Calling: {tool_name}({arguments})")
                         tool_result = execute_tool_call(tool_name, arguments)
                         
-                        self.conversation_history.append({
-                            "role": "tool",
-                            "content": tool_result
-                        })
+                        self._conversation.add_tool_message(tool_result)
                     continue
                 else:
                     content = message.get("content", "")
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": content
-                    })
+                    self._conversation.add_assistant_message(content)
                     return content.strip()
                     
             except Exception as e:
@@ -1097,7 +1359,13 @@ class OllamaClientWithTools:
 
 
 class LiteLLMClient:
-    """LiteLLM client for online LLM APIs (OpenAI, Anthropic, etc.)."""
+    """LiteLLM client for online LLM APIs (OpenAI, Anthropic, etc.).
+    
+    Includes automatic conversation history management with:
+    - Message count limiting (MAX_CONVERSATION_MESSAGES)
+    - Token-based reset (MAX_CONVERSATION_TOKENS)
+    - Timeout-based reset (CONVERSATION_TIMEOUT_MINUTES)
+    """
     
     def __init__(
         self,
@@ -1113,20 +1381,16 @@ class LiteLLMClient:
         self.api_key = api_key
         self.stream = stream
         self.max_tokens = max_tokens
-        self.conversation_history: list[dict] = []
-        
-        if system_prompt:
-            self.conversation_history.append({
-                "role": "system",
-                "content": system_prompt
-            })
+        self._conversation = ConversationManager(system_prompt=system_prompt)
+    
+    @property
+    def conversation_history(self) -> list[dict]:
+        """Get conversation history (for compatibility)."""
+        return self._conversation.get_messages()
     
     def query(self, user_text: str) -> str:
         """Send a query to the LLM API and return the response."""
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_text
-        })
+        self._conversation.add_user_message(user_text)
         
         headers = {
             "Content-Type": "application/json",
@@ -1135,7 +1399,7 @@ class LiteLLMClient:
         
         payload = {
             "model": self.model,
-            "messages": self.conversation_history,
+            "messages": self._conversation.get_messages(),
             "max_tokens": self.max_tokens,
             "stream": self.stream,
         }
@@ -1157,20 +1421,14 @@ class LiteLLMClient:
                             chunk = delta.get("content", "")
                             full_response += chunk
                 
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": full_response
-                })
+                self._conversation.add_assistant_message(full_response)
                 return full_response.strip()
             else:
                 response = requests.post(self.url, json=payload, headers=headers, timeout=120)
                 if response.status_code == 200:
                     data = response.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": content
-                    })
+                    self._conversation.add_assistant_message(content)
                     return content.strip()
                 else:
                     return "Sorry, I encountered an error."
@@ -1180,7 +1438,13 @@ class LiteLLMClient:
 
 
 class LiteLLMClientWithTools:
-    """LiteLLM client with tool calling support for internet features."""
+    """LiteLLM client with tool calling support for internet features.
+    
+    Includes automatic conversation history management with:
+    - Message count limiting (MAX_CONVERSATION_MESSAGES)
+    - Token-based reset (MAX_CONVERSATION_TOKENS)
+    - Timeout-based reset (CONVERSATION_TIMEOUT_MINUTES)
+    """
     
     def __init__(
         self,
@@ -1196,13 +1460,12 @@ class LiteLLMClientWithTools:
         self.api_key = api_key
         self.stream = stream
         self.max_tokens = max_tokens
-        self.conversation_history: list[dict] = []
-        
-        if system_prompt:
-            self.conversation_history.append({
-                "role": "system",
-                "content": system_prompt
-            })
+        self._conversation = ConversationManager(system_prompt=system_prompt)
+    
+    @property
+    def conversation_history(self) -> list[dict]:
+        """Get conversation history (for compatibility)."""
+        return self._conversation.get_messages()
     
     def query(self, user_text: str) -> str:
         """Query without tools (for compatibility)."""
@@ -1213,10 +1476,7 @@ class LiteLLMClientWithTools:
         from tools import execute_tool_call
         import json
         
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_text
-        })
+        self._conversation.add_user_message(user_text)
         
         headers = {
             "Content-Type": "application/json",
@@ -1239,7 +1499,7 @@ class LiteLLMClientWithTools:
             
             payload = {
                 "model": self.model,
-                "messages": self.conversation_history,
+                "messages": self._conversation.get_messages(),
                 "max_tokens": self.max_tokens,
                 "stream": False,
             }
@@ -1260,7 +1520,7 @@ class LiteLLMClientWithTools:
                 
                 if tool_calls:
                     print(f"🔧 Model requested {len(tool_calls)} tool call(s)")
-                    self.conversation_history.append(message)
+                    self._conversation.add_raw_message(message)
                     
                     for tool_call in tool_calls:
                         tool_name = tool_call.get("function", {}).get("name", "")
@@ -1270,18 +1530,11 @@ class LiteLLMClientWithTools:
                         print(f"   Calling: {tool_name}({arguments})")
                         tool_result = execute_tool_call(tool_name, arguments)
                         
-                        self.conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.get("id", ""),
-                            "content": tool_result
-                        })
+                        self._conversation.add_tool_message(tool_result, tool_call.get("id", ""))
                     continue
                 else:
                     content = message.get("content", "")
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": content
-                    })
+                    self._conversation.add_assistant_message(content)
                     return content.strip()
                     
             except Exception as e:
@@ -1717,7 +1970,7 @@ def main(
         vad_listener.disable_vad()
         logger.debug("VAD disabled for STT processing")
         
-        print(f"-> Speech segment detected ({len(raw_bytes)} bytes).")
+        logger.debug(f"Speech segment detected ({len(raw_bytes)} bytes)")
         logger.info(f"Processing speech segment: {audio_duration_ms:.0f}ms")
         
         # Perform STT
@@ -1731,7 +1984,7 @@ def main(
             print("STT error:", exc)
             recognized_text = ""
         
-        print("-> User said:", recognized_text)
+        logger.info(f"User: {recognized_text}")
         
         # Helper to return to listening state. In wake word mode we stop the short-lived command
         # listener and resume wake word detection; in continuous mode we simply re-enable VAD.
@@ -1770,7 +2023,7 @@ def main(
         llm_time = (time.time() - llm_start) * 1000
         logger.debug(f"LLM response received in {llm_time:.0f}ms: '{llm_response[:100]}...'")
         
-        print("-> Bot response:", llm_response)
+        logger.info(f"Bot: {llm_response}")
         
         if not llm_response.strip():
             logger.warning("LLM returned empty response")
@@ -1810,9 +2063,49 @@ def main(
         if use_wakeword:
             vad_listener.stop()
             listening_active.clear()
-            time.sleep(4.0)  # Longer cooldown to let TTS audio fully clear before resuming wake word
+            
+            # Brief follow-up window: listen for continuation without requiring wakeword
+            followup_seconds = DEFAULT_FOLLOWUP_WINDOW_SECONDS
+            if followup_seconds > 0:
+                logger.debug(f"Starting {followup_seconds}s follow-up listening window")
+                time.sleep(1.0)  # Let TTS audio clear first
+                
+                # Use a threading event to track if follow-up speech was detected
+                followup_detected = threading.Event()
+                
+                def on_followup_speech(audio_data: bytes) -> None:
+                    """Handle follow-up speech during the brief window."""
+                    followup_detected.set()
+                    # Process the follow-up speech recursively
+                    on_speech_detected(audio_data)
+                
+                # Create a short fixed-time listener for follow-up
+                followup_listener = FixedTimeListener(
+                    listen_seconds=followup_seconds,
+                    sample_rate=DEFAULT_VAD_SAMPLE_RATE,
+                    device_index=None,
+                    on_speech_callback=on_followup_speech
+                )
+                
+                print("-> Continue speaking or say wake word for new topic...")
+                followup_listener.start()
+                
+                # Wait for the follow-up window to complete
+                # The listener will call on_followup_speech if speech is detected
+                time.sleep(followup_seconds + 0.5)
+                followup_listener.stop()
+                
+                # If follow-up was detected, the recursive call handles the rest
+                if followup_detected.is_set():
+                    logger.debug("Follow-up speech detected and processed")
+                    return
+                
+                logger.debug("No follow-up speech detected, resuming wakeword")
+            else:
+                time.sleep(4.0)  # Original cooldown if follow-up disabled
+            
             wakeword_detector.resume()
-            logger.debug("Wake word detector resumed after 4s cooldown")
+            logger.debug("Wake word detector resumed")
         else:
             vad_listener.enable_vad()
             logger.debug("VAD re-enabled")

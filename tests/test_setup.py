@@ -12,44 +12,44 @@ def test_imports():
         print("  ✓ pyaudio")
     except ImportError as e:
         print(f"  ✗ pyaudio: {e}")
-        return False
+        assert False, f"Failed to import pyaudio: {e}"
     
     try:
         import webrtcvad
         print("  ✓ webrtcvad")
     except ImportError as e:
         print(f"  ✗ webrtcvad: {e}")
-        return False
+        assert False, f"Failed to import webrtcvad: {e}"
     
     try:
         from faster_whisper import WhisperModel
         print("  ✓ faster-whisper")
     except ImportError as e:
         print(f"  ✗ faster-whisper: {e}")
-        return False
+        assert False, f"Failed to import faster-whisper: {e}"
     
     try:
         from kokoro_onnx import Kokoro
         print("  ✓ kokoro-onnx")
     except ImportError as e:
         print(f"  ✗ kokoro-onnx: {e}")
-        return False
+        assert False, f"Failed to import kokoro-onnx: {e}"
     
     try:
         import requests
         print("  ✓ requests")
     except ImportError as e:
         print(f"  ✗ requests: {e}")
-        return False
+        assert False, f"Failed to import requests: {e}"
     
     try:
         import numpy
         print("  ✓ numpy")
     except ImportError as e:
         print(f"  ✗ numpy: {e}")
-        return False
+        assert False, f"Failed to import numpy: {e}"
     
-    return True
+    assert True
 
 def test_cuda():
     """Check CUDA availability for faster-whisper."""
@@ -59,13 +59,13 @@ def test_cuda():
         cuda_devices = ctranslate2.get_cuda_device_count()
         if cuda_devices > 0:
             print(f"  ✓ CUDA available: {cuda_devices} device(s)")
-            return True
+            assert True
         else:
             print("  ⚠ CUDA not available (will use CPU)")
-            return True
+            assert True
     except Exception as e:
         print(f"  ⚠ CUDA check failed: {e} (will use CPU)")
-        return True
+        assert True
 
 def test_audio_devices():
     """Check available audio devices."""
@@ -101,11 +101,11 @@ def test_audio_devices():
             print(f"    ✓ Found {output_count} output device(s)")
         
         p.terminate()
-        return input_count > 0 and output_count > 0
+        assert input_count > 0 and output_count > 0, "Missing audio devices"
         
     except Exception as e:
         print(f"  ✗ Audio device check failed: {e}")
-        return False
+        assert False, f"Audio device check failed: {e}"
 
 def test_ollama():
     """Check if Ollama is running and has the required model."""
@@ -125,27 +125,27 @@ def test_ollama():
                 
                 if any('gemma3:270m' in model for model in models):
                     print("  ✓ gemma3:270m model is available")
-                    return True
+                    assert True
                 else:
                     print("  ✗ gemma3:270m model not found!")
                     print("    Available models:", models)
                     print("    Run: ollama run gemma3:270m")
-                    return False
+                    assert False, "gemma3:270m model not found"
             else:
                 print(f"  ✗ Ollama returned status code: {response.status_code}")
-                return False
+                assert False, f"Ollama returned status code: {response.status_code}"
                 
         except requests.exceptions.ConnectionError:
             print("  ✗ Cannot connect to Ollama server")
             print("    Make sure Ollama is running: ollama serve")
-            return False
+            assert False, "Cannot connect to Ollama server"
         except requests.exceptions.Timeout:
             print("  ✗ Connection to Ollama timed out")
-            return False
+            assert False, "Connection to Ollama timed out"
             
     except Exception as e:
         print(f"  ✗ Ollama check failed: {e}")
-        return False
+        assert False, f"Ollama check failed: {e}"
 
 def main():
     """Run all tests."""

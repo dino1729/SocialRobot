@@ -26,7 +26,7 @@ def test_memory_functions():
         print(f"   ✓ Usage: {stats['percent']:.1f}%")
     else:
         print("   ✗ Failed to read system memory stats")
-        return False
+        assert False, "Failed to read system memory stats"
     
     # Test process memory
     print("\n2. Testing process memory...")
@@ -36,7 +36,7 @@ def test_memory_functions():
         print(f"   ✓ Process memory: {process_mem:.1f} MB")
     else:
         print("   ✗ Failed to read process memory")
-        return False
+        assert False, "Failed to read process memory"
     
     # Test formatting
     print("\n3. Testing memory stats formatting...")
@@ -54,7 +54,7 @@ def test_memory_functions():
     print("\n" + "=" * 60)
     print("✅ All memory monitoring tests passed!")
     print("\nMemory overhead of monitoring: ~negligible (<1MB)")
-    return True
+    assert True
 
 if __name__ == "__main__":
     success = test_memory_functions()

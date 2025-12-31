@@ -106,6 +106,7 @@ def record_audio_vad(
     activation_ratio: float = 0.6,
     deactivation_ratio: float = 0.85,
     timeout_seconds: float = 30.0,
+    debug: bool = False,
 ) -> Optional[bytes]:
     """Record audio using VAD (Voice Activity Detection).
     
@@ -120,6 +121,10 @@ def record_audio_vad(
     padding_frames = max(1, int(padding_duration_ms / frame_duration_ms))
     activation_count = max(1, int(padding_frames * activation_ratio))
     deactivation_count = max(1, int(padding_frames * deactivation_ratio))
+
+    if debug:
+        print(f"   [DEBUG] VAD Config:")
+        print(f"           padding_frames={padding_frames}, activation_count={activation_count}, deactivation_count={deactivation_count}")
     
     # Suppress JACK warnings during stream creation
     with suppress_stderr():
@@ -160,7 +165,13 @@ def record_audio_vad(
             else:
                 voiced_frames.append(frame)
                 num_unvoiced = sum(1 for _, speech in ring_buffer if not speech)
+                if debug and len(ring_buffer) == ring_buffer.maxlen:
+                    # Show rolling buffer state: S=speech, .=silence
+                    buffer_viz = ''.join('S' if s else '.' for _, s in ring_buffer)
+                    print(f"\r   [DEBUG] Buffer: [{buffer_viz}] unvoiced={num_unvoiced}/{deactivation_count}  ", end='', flush=True)
                 if len(ring_buffer) == ring_buffer.maxlen and num_unvoiced >= deactivation_count:
+                    if debug:
+                        print()  # newline after debug output
                     print("   ✓ Speech ended\n")
                     break
     
@@ -276,6 +287,15 @@ Examples:
         "--loop", "-l", action="store_true",
         help="Loop continuously (Ctrl+C to exit)"
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show VAD debug output (buffer state, speech detection)"
+    )
+    parser.add_argument(
+        "--deactivation-ratio", type=float,
+        default=float(os.getenv("VAD_DEACTIVATION_RATIO", "0.85")),
+        help="VAD deactivation ratio 0.0-1.0 (default: 0.85). Lower = ends speech faster"
+    )
     
     args = parser.parse_args()
     
@@ -333,6 +353,8 @@ Examples:
             audio_bytes = record_audio_vad(
                 sample_rate=sample_rate,
                 aggressiveness=args.vad_aggressiveness,
+                deactivation_ratio=args.deactivation_ratio,
+                debug=args.debug,
             )
         
         if not audio_bytes:

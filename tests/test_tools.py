@@ -82,7 +82,7 @@ def test_tool_registry():
         missing = [t for t in expected_tools if t not in found_tools]
         print_result(False, f"Missing tools: {missing}")
     
-    return all_found
+    assert all_found, f"Missing tools: {[t for t in expected_tools if t not in found_tools]}"
 
 
 def test_search_web():
@@ -92,7 +92,7 @@ def test_search_web():
     # Check if Firecrawl is available
     if not check_firecrawl():
         print_result(False, "Skipping search test - Firecrawl not available")
-        return False
+        assert False, "Firecrawl not available"
     
     try:
         # Test search
@@ -104,14 +104,14 @@ def test_search_web():
         if result and "error" not in result.lower() and len(result) > 50:
             print_result(True, f"Search returned {len(result)} characters")
             print(f"\nFirst 200 chars of result:\n{result[:200]}...")
-            return True
+            assert True
         else:
             print_result(False, f"Search returned unexpected result: {result[:200]}")
-            return False
+            assert False, f"Search returned unexpected result"
             
     except Exception as e:
         print_result(False, f"Search test failed: {e}")
-        return False
+        assert False, f"Search test failed: {e}"
 
 
 def test_scrape_webpage():
@@ -121,7 +121,7 @@ def test_scrape_webpage():
     # Check if Firecrawl is available
     if not check_firecrawl():
         print_result(False, "Skipping scrape test - Firecrawl not available")
-        return False
+        assert False, "Firecrawl not available"
     
     try:
         # Test scraping a simple page
@@ -133,14 +133,14 @@ def test_scrape_webpage():
         if result and "error" not in result.lower() and len(result) > 50:
             print_result(True, f"Scrape returned {len(result)} characters")
             print(f"\nFirst 200 chars of result:\n{result[:200]}...")
-            return True
+            assert True
         else:
             print_result(False, f"Scrape returned unexpected result: {result[:200]}")
-            return False
+            assert False, "Scrape returned unexpected result"
             
     except Exception as e:
         print_result(False, f"Scrape test failed: {e}")
-        return False
+        assert False, f"Scrape test failed: {e}"
 
 
 def test_get_weather():
@@ -150,7 +150,7 @@ def test_get_weather():
     # Check if API key is configured
     if not check_openweathermap():
         print_result(False, "Skipping weather test - API key not configured")
-        return False
+        assert False, "OpenWeatherMap API key not configured"
     
     try:
         # Test weather lookup
@@ -162,14 +162,14 @@ def test_get_weather():
         if result and "error" not in result.lower() and "Temperature" in result:
             print_result(True, f"Weather lookup successful")
             print(f"\nWeather result:\n{result}")
-            return True
+            assert True
         else:
             print_result(False, f"Weather returned unexpected result: {result}")
-            return False
+            assert False, "Weather returned unexpected result"
             
     except Exception as e:
         print_result(False, f"Weather test failed: {e}")
-        return False
+        assert False, f"Weather test failed: {e}"
 
 
 def test_execute_tool_call():
@@ -218,7 +218,7 @@ def test_execute_tool_call():
     
     success = tests_passed == tests_total
     print(f"\nPassed {tests_passed}/{tests_total} execution tests")
-    return success
+    assert success, f"Only {tests_passed}/{tests_total} execution tests passed"
 
 
 def test_tool_definitions():
@@ -262,10 +262,10 @@ def test_tool_definitions():
         print_result(False, f"Found {len(issues)} issues:")
         for issue in issues:
             print(f"  - {issue}")
-        return False
+        assert False, f"Found {len(issues)} issues in tool definitions"
     else:
         print_result(True, f"All {len(TOOLS)} tool definitions are properly formatted")
-        return True
+        assert True
 
 
 def run_all_tests():

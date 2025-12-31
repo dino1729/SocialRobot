@@ -26,18 +26,18 @@ def test_ollama_connection():
             
             if tool_capable:
                 print(f"   ✓ Found tool-capable model(s): {', '.join(tool_capable)}")
-                return True
+                assert True
             else:
                 print("   ✗ No tool-capable models found!")
                 print("     Install one with: ollama pull llama3.2:1b")
-                return False
+                assert False, "No tool-capable models found"
         else:
             print(f"   ✗ Ollama returned status {response.status_code}")
-            return False
+            assert False, f"Ollama returned status {response.status_code}"
     except Exception as e:
         print(f"   ✗ Cannot connect to Ollama: {e}")
         print("     Make sure Ollama is running")
-        return False
+        assert False, f"Cannot connect to Ollama: {e}"
 
 
 def test_firecrawl_connection():
@@ -50,17 +50,17 @@ def test_firecrawl_connection():
         response = requests.get(f"{firecrawl_url}/", timeout=5)
         if response.status_code == 200:
             print(f"   ✓ Firecrawl is accessible at {firecrawl_url}")
-            return True
+            assert True
         else:
             print(f"   ✗ Firecrawl returned status {response.status_code}")
-            return False
+            assert False, f"Firecrawl returned status {response.status_code}"
     except requests.exceptions.ConnectionError:
         print(f"   ✗ Cannot connect to Firecrawl at {firecrawl_url}")
         print("     Start Firecrawl with: cd ~/firecrawl && docker compose up -d")
-        return False
+        assert False, f"Cannot connect to Firecrawl at {firecrawl_url}"
     except Exception as e:
         print(f"   ✗ Firecrawl error: {e}")
-        return False
+        assert False, f"Firecrawl error: {e}"
 
 
 def test_firecrawl_search():
@@ -85,14 +85,14 @@ def test_firecrawl_search():
             data = response.json()
             results = data.get("data", [])
             print(f"   ✓ Search working! Found {len(results)} results")
-            return True
+            assert True
         else:
             print(f"   ✗ Search returned status {response.status_code}")
             print(f"     Response: {response.text[:200]}")
-            return False
+            assert False, f"Search returned status {response.status_code}"
     except Exception as e:
         print(f"   ✗ Search test failed: {e}")
-        return False
+        assert False, f"Search test failed: {e}"
 
 
 def test_firecrawl_scrape():
@@ -121,17 +121,17 @@ def test_firecrawl_scrape():
             content = data.get("data", {}).get("markdown", "")
             if content:
                 print(f"   ✓ Scraping working! Got {len(content)} characters")
-                return True
+                assert True
             else:
                 print("   ⚠️  Scrape succeeded but no content returned")
-                return False
+                assert False, "Scrape succeeded but no content returned"
         else:
             print(f"   ✗ Scrape returned status {response.status_code}")
             print(f"     Response: {response.text[:200]}")
-            return False
+            assert False, f"Scrape returned status {response.status_code}"
     except Exception as e:
         print(f"   ✗ Scrape test failed: {e}")
-        return False
+        assert False, f"Scrape test failed: {e}"
 
 
 def test_ollama_tool_support():
@@ -154,7 +154,7 @@ def test_ollama_tool_support():
         if not tool_model:
             print("   ✗ No tool-capable model found")
             print("     Install with: ollama pull llama3.2:1b")
-            return False
+            assert False, "No tool-capable model found"
         
         print(f"   Testing with model: {tool_model}")
         
@@ -184,18 +184,18 @@ def test_ollama_tool_support():
         # Check if model responded (tool call or direct answer both ok)
         if response:
             print("   ✓ Ollama tool support is working")
-            return True
+            assert True
         else:
             print("   ✗ Ollama tool support test failed")
-            return False
+            assert False, "Ollama tool support test failed"
             
     except ImportError:
         print("   ⚠️  ollama-python package not installed")
         print("     Install with: pip install ollama")
-        return False
+        assert False, "ollama-python package not installed"
     except Exception as e:
         print(f"   ✗ Tool support test failed: {e}")
-        return False
+        assert False, f"Tool support test failed: {e}"
 
 
 def test_audio_devices():
@@ -214,13 +214,13 @@ def test_audio_devices():
         
         if input_count > 0 and output_count > 0:
             print(f"   ✓ Audio devices found: {input_count} input(s), {output_count} output(s)")
-            return True
+            assert True
         else:
             print(f"   ✗ Audio devices missing")
-            return False
+            assert False, "Audio devices missing"
     except Exception as e:
         print(f"   ✗ Audio test failed: {e}")
-        return False
+        assert False, f"Audio test failed: {e}"
 
 
 def main():

@@ -18,6 +18,8 @@ import numpy as np
 from audio.suppress_warnings import get_pyaudio, suppress_stderr
 pyaudio = get_pyaudio()
 
+logger = logging.getLogger('socialrobot')
+
 
 @contextlib.contextmanager
 def suppress_chatterbox_logs():
@@ -320,13 +322,13 @@ class ChatterboxTTS:
         text_chunks = self._split_text_by_sentences(text, max_chars=250)
         
         if len(text_chunks) > 1:
-            print(f"-> Splitting text into {len(text_chunks)} chunks for synthesis")
+            logger.debug(f"Splitting text into {len(text_chunks)} chunks for synthesis")
         
         audio_arrays = []
         
         for i, chunk in enumerate(text_chunks):
             if len(text_chunks) > 1:
-                print(f"-> Synthesizing chunk {i+1}/{len(text_chunks)}: {chunk[:40]}...")
+                logger.debug(f"Synthesizing chunk {i+1}/{len(text_chunks)}: {chunk[:40]}...")
             
             try:
                 # Generate audio with or without voice cloning
@@ -347,7 +349,7 @@ class ChatterboxTTS:
                 audio_arrays.append(wav_np)
                 
             except Exception as e:
-                print(f"-> Error synthesizing chunk {i+1}: {e}")
+                logger.warning(f"Error synthesizing chunk {i+1}: {e}")
                 continue
         
         if not audio_arrays:
