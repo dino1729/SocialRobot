@@ -10,7 +10,17 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
-import pyaudio
+from audio.suppress_warnings import (
+    get_pyaudio,
+    suppress_stderr,
+    suppress_ml_warnings,
+    init_vibevoice_silent,
+)
+
+# Suppress ML library warnings early
+suppress_ml_warnings()
+
+pyaudio = get_pyaudio()
 
 
 class _DictWithAttrs:
@@ -176,14 +186,7 @@ class VibeVoiceTTS:
             raise ImportError("PyTorch not installed. Run: pip install torch") from e
 
         try:
-            from vibevoice.modular.modeling_vibevoice_streaming_inference import (
-                VibeVoiceStreamingForConditionalGenerationInference,
-            )
-            from vibevoice.processor.vibevoice_streaming_processor import (
-                VibeVoiceStreamingProcessor,
-            )
-            self._ModelClass = VibeVoiceStreamingForConditionalGenerationInference
-            self._ProcessorClass = VibeVoiceStreamingProcessor
+            self._ModelClass, self._ProcessorClass = init_vibevoice_silent()
             print("-> VibeVoice library loaded successfully")
         except ImportError as e:
             print("-> Error: VibeVoice not installed. Install with:")

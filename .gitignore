@@ -14,3 +14,7 @@ audio_output/
 create_audio.py
 .bot.pid
 audio/VibeVoice/
+.coverage
+.pytest_cache/
+.claude
+.audio_config

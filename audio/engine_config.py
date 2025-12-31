@@ -198,10 +198,131 @@ def _get_default_compute_type(device: str) -> str:
     return "float16"
 
 
+# =============================================================================
+# WER (Word Error Rate) utilities for benchmarking
+# =============================================================================
+
+def normalize_text_for_wer(text: str) -> str:
+    """Normalize text for WER computation.
+    
+    Applies the following normalizations:
+    - Lowercase
+    - Remove punctuation
+    - Collapse multiple spaces to single space
+    - Strip leading/trailing whitespace
+    
+    Args:
+        text: Input text to normalize
+        
+    Returns:
+        Normalized text suitable for WER comparison
+    """
+    import re
+    
+    if not text:
+        return ""
+    
+    # Lowercase
+    text = text.lower()
+    
+    # Remove punctuation (keep only alphanumeric and spaces)
+    text = re.sub(r"[^\w\s]", "", text)
+    
+    # Collapse multiple spaces
+    text = re.sub(r"\s+", " ", text)
+    
+    # Strip
+    return text.strip()
+
+
+def _levenshtein_distance(ref_words: list, hyp_words: list) -> int:
+    """Compute Levenshtein (edit) distance between two word sequences.
+    
+    Uses dynamic programming to find minimum number of insertions,
+    deletions, and substitutions needed to transform hyp_words into ref_words.
+    
+    Args:
+        ref_words: Reference word list
+        hyp_words: Hypothesis word list
+        
+    Returns:
+        Minimum edit distance (number of operations)
+    """
+    m, n = len(ref_words), len(hyp_words)
+    
+    # Create DP table
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    
+    # Base cases: transforming empty string
+    for i in range(m + 1):
+        dp[i][0] = i  # deletions
+    for j in range(n + 1):
+        dp[0][j] = j  # insertions
+    
+    # Fill DP table
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if ref_words[i - 1] == hyp_words[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]  # no operation needed
+            else:
+                dp[i][j] = 1 + min(
+                    dp[i - 1][j],      # deletion
+                    dp[i][j - 1],      # insertion
+                    dp[i - 1][j - 1],  # substitution
+                )
+    
+    return dp[m][n]
+
+
+def word_error_rate(reference: str, hypothesis: str) -> float:
+    """Compute Word Error Rate (WER) between reference and hypothesis.
+    
+    WER = (S + D + I) / N
+    where:
+      S = substitutions
+      D = deletions
+      I = insertions
+      N = number of words in reference
+    
+    Both strings are normalized before comparison.
+    
+    Args:
+        reference: Ground truth text
+        hypothesis: Predicted/transcribed text
+        
+    Returns:
+        WER as a float (0.0 = perfect match, 1.0 = all words wrong).
+        Can exceed 1.0 if hypothesis has many insertions.
+    """
+    # Normalize both texts
+    ref_norm = normalize_text_for_wer(reference)
+    hyp_norm = normalize_text_for_wer(hypothesis)
+    
+    # Handle edge cases
+    if not ref_norm and not hyp_norm:
+        return 0.0  # both empty is a perfect match
+    if not ref_norm:
+        # Reference is empty but hypothesis has words - infinite WER conceptually
+        # Return length of hypothesis as WER (all insertions)
+        return float(len(hyp_norm.split()))
+    if not hyp_norm:
+        # Hypothesis is empty - 100% deletion rate
+        return 1.0
+    
+    ref_words = ref_norm.split()
+    hyp_words = hyp_norm.split()
+    
+    distance = _levenshtein_distance(ref_words, hyp_words)
+    
+    return distance / len(ref_words)
+
+
 __all__ = [
     "STTEngine",
     "TTSEngine",
     "create_stt_engine",
     "create_tts_engine",
+    "normalize_text_for_wer",
+    "word_error_rate",
 ]
 

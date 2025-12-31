@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 import numpy as np
-import pyaudio
+from audio.suppress_warnings import get_pyaudio, suppress_stderr
+pyaudio = get_pyaudio()
 import time
 from piper import PiperVoice
 

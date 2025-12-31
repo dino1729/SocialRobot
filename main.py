@@ -2,8 +2,18 @@
 Unified Voice Assistant Entrypoint
 ===================================
 
-This consolidated script replaces the previous 6 separate main_*.py scripts with a single
-unified CLI that supports all feature combinations through command-line flags.
+This is the single entrypoint for the SocialRobot voice assistant. It consolidates the
+previous `main_*.py` variants into one CLI, where features are enabled via flags.
+
+High-level pipeline:
+1) Listen: either continuous (VAD / fixed-time) or wake word → command capture
+2) Transcribe: STT converts audio → text
+3) Think: LLM generates a response (optionally with tool calls)
+4) Speak: TTS synthesizes audio and plays it back
+
+Configuration precedence:
+- CLI flags override `.env`
+- `.env` overrides built-in defaults in this file
 
 FEATURE FLAGS:
   --wakeword          Enable wake word detection (default: disabled, continuous listening)
@@ -30,10 +40,18 @@ ADDITIONAL OPTIONS:
                           Auto-loads voice from voices/{name}.wav and persona from personas/{name}.txt
   --vibevoice-speaker NAME  Speaker for VibeVoice TTS (default: Carter)
                           Available: Carter, Bria, Alex, Dora, Nova, Sol, Aria, Isla, Eva, Maya, Raj
-  --wakeword-threshold    Wake word detection threshold 0.0-1.0 (default: 0.5)
+  --wakeword-threshold    Wake word detection threshold 0.0-1.0 (default comes from WAKEWORD_THRESHOLD)
   --no-memory-monitor     Disable periodic memory usage stats
   --monitor-interval SEC  Memory monitor update interval in seconds (default: 60)
+  --no-auto-calibrate     Disable automatic noise calibration at startup
+  --calibration-seconds SEC  Duration of ambient noise sampling (default: 2.0)
   --debug                 Enable detailed debug logging for troubleshooting
+
+NOISE CALIBRATION:
+  At startup, the assistant measures ambient noise for 2 seconds (configurable) and
+  automatically adjusts VAD aggressiveness and wakeword threshold for optimal performance:
+  - Quiet rooms: More sensitive settings to catch soft speech
+  - Noisy environments: Stricter filtering to reduce false triggers
 
 EXAMPLES:
   # Basic voice assistant (continuous listening, local Ollama)
@@ -67,36 +85,110 @@ EXAMPLES:
   python main.py --tts-engine vibevoice --vibevoice-speaker Bria --tts-gpu
 
 ENVIRONMENT VARIABLES (from .env file):
+  # Feature Flags
+  USE_WAKEWORD        - Enable wake word mode (default: false)
+  LLM_BACKEND         - LLM backend: ollama or litellm (default: ollama)
+  USE_TOOLS           - Enable internet tools (default: false)
+  ENABLE_MEMORY_MONITOR - Show memory stats (default: true)
+  MONITOR_INTERVAL    - Memory monitor interval in seconds (default: 60)
+  AUTO_CALIBRATE      - Enable noise calibration (default: true)
+  CALIBRATION_SECONDS - Calibration duration in seconds (default: 2.0)
+
+  # LLM Configuration
   OLLAMA_URL          - Ollama API endpoint (default: http://localhost:11434/api/chat)
   OLLAMA_MODEL        - Ollama model to use (default: gemma3:270m or llama3.2:1b for tools)
   LITELLM_URL         - LiteLLM API endpoint (default: https://api.openai.com/v1/chat/completions)
   LITELLM_MODEL       - LiteLLM model (default: gpt-3.5-turbo)
   LITELLM_API_KEY     - API key for LiteLLM (required when using --llm litellm)
+
+  # Wake Word
   WAKEWORD_MODEL      - Wake word model name (default: hey_jarvis_v0.1)
-  WAKEWORD_THRESHOLD  - Detection threshold (default: 0.5)
+  WAKEWORD_THRESHOLD  - Detection threshold (default: 0.8 in code, often tuned per room)
+
+  # VAD (Voice Activity Detection)
+  USE_VAD             - Enable VAD for speech detection (default: true)
+  FIXED_LISTEN_SECONDS - Recording duration when VAD disabled (default: 5.0)
+  VAD_SAMPLE_RATE     - Audio sample rate in Hz (default: 16000)
+  VAD_FRAME_DURATION_MS - Frame duration in ms: 10, 20, or 30 (default: 30)
+  VAD_PADDING_DURATION_MS - Trailing audio duration in ms (default: 360)
+  VAD_AGGRESSIVENESS  - Noise filtering 0-3, higher=stricter (default: 2)
+  VAD_ACTIVATION_RATIO - Speech start threshold 0.0-1.0 (default: 0.6)
+  VAD_DEACTIVATION_RATIO - Speech end threshold 0.0-1.0 (default: 0.85)
+
+  # Internet Tools
   FIRECRAWL_URL       - Firecrawl server URL for web tools (default: http://localhost:3002)
   OPENWEATHERMAP_API_KEY - API key for weather tool (optional)
+
+  # STT Configuration
+  STT_ENGINE          - STT engine (default: faster-whisper, options: openai-whisper)
+  STT_GPU             - Enable STT GPU acceleration (default: false)
+  STT_DEVICE          - STT device override (options: cpu, cuda)
+
+  # TTS Configuration
+  TTS_ENGINE          - TTS engine (default: kokoro, options: piper, chatterbox, vibevoice)
+  TTS_GPU             - Enable TTS GPU acceleration (default: false)
+  TTS_VOICE           - Voice character for Chatterbox (e.g., morgan_freeman, rick_sanchez)
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
 import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Optional, Callable, TYPE_CHECKING
+
+# =============================================================================
+# Suppress ALSA/JACK Warnings (before importing audio libraries)
+# =============================================================================
+
+# Best-effort suppression of noisy C-library logs (ALSA/JACK) so the terminal stays readable.
+# This does not affect Python exceptions; it only silences some lower-level audio diagnostics.
+try:
+    ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
+                                          ctypes.c_char_p, ctypes.c_int,
+                                          ctypes.c_char_p)
+    def _py_error_handler(filename, line, function, err, fmt):
+        pass
+    _c_error_handler = ERROR_HANDLER_FUNC(_py_error_handler)
+    _asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+    _asound.snd_lib_error_set_handler(_c_error_handler)
+except:
+    pass
+
+
+@contextmanager
+def suppress_stderr():
+    """Temporarily redirect `stderr` to `/dev/null` (used around imports that spam warnings)."""
+    sys.stderr.flush()
+    old_stderr_fd = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr_fd, 2)
+        os.close(old_stderr_fd)
+
+
+# Import pyaudio with suppressed warnings
+with suppress_stderr():
+    import pyaudio  # noqa: F401 - imported for side effects (suppresses warnings on first use)
 
 import requests
 from dotenv import load_dotenv
 
 # Core audio components (always needed)
-from audio.vad import VADConfig, VADListener
+from audio.vad import VADConfig, VADListener, FixedTimeListener
 from audio.engine_config import create_tts_engine, create_stt_engine, TTSEngine, STTEngine
 
-# Load environment variables from .env file
+# Load configuration defaults from `.env` (CLI args may override these).
 load_dotenv()
 
 # =============================================================================
@@ -140,10 +232,15 @@ logger = logging.getLogger('socialrobot')
 # Configuration from Environment Variables
 # =============================================================================
 
-# Ollama (local LLM) configuration
+# These values are read once at import time and serve as defaults for CLI/config wiring.
+# Keep names aligned with `env.example`.
+
+# Ollama (local LLM) configuration.
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:270m")
-OLLAMA_MODEL_TOOLS = os.getenv("OLLAMA_MODEL_TOOLS", "llama3.2:1b")  # Tool-capable model
+# Tool-capable model: used when `--tools` is enabled because tool calling benefits from models
+# trained for function/tool use.
+OLLAMA_MODEL_TOOLS = os.getenv("OLLAMA_MODEL_TOOLS", "llama3.2:1b")
 
 # LiteLLM (online LLM) configuration
 LITELLM_URL = os.getenv("LITELLM_URL", "https://api.openai.com/v1/chat/completions")
@@ -152,12 +249,45 @@ LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 
 # Wake word configuration
 WAKEWORD_MODEL = os.getenv("WAKEWORD_MODEL", "hey_jarvis_v0.1")
-# Higher threshold (0.8) reduces false positives; lower (0.5) is more sensitive
+# Higher threshold reduces false positives; lower is more sensitive.
+# Note: this is the in-code default if WAKEWORD_THRESHOLD is not set in `.env`.
 WAKEWORD_THRESHOLD = float(os.getenv("WAKEWORD_THRESHOLD", "0.8"))
 
 # Internet tools configuration
 FIRECRAWL_URL = os.getenv("FIRECRAWL_URL", "http://localhost:3002")
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
+
+# STT (Speech-to-Text) configuration
+DEFAULT_STT_ENGINE = os.getenv("STT_ENGINE", "faster-whisper")
+DEFAULT_STT_GPU = os.getenv("STT_GPU", "false").lower() in ("true", "1", "yes")
+DEFAULT_STT_DEVICE = os.getenv("STT_DEVICE", None)  # None = auto-detect
+# If STT_GPU is set but STT_DEVICE is not, derive device from STT_GPU
+if DEFAULT_STT_DEVICE is None and DEFAULT_STT_GPU:
+    DEFAULT_STT_DEVICE = "cuda"
+
+# TTS (Text-to-Speech) configuration
+DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "kokoro")
+DEFAULT_TTS_GPU = os.getenv("TTS_GPU", "false").lower() in ("true", "1", "yes")
+DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", None)  # For Chatterbox voice character
+
+# Feature flags configuration
+DEFAULT_USE_WAKEWORD = os.getenv("USE_WAKEWORD", "false").lower() in ("true", "1", "yes")
+DEFAULT_LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama")
+DEFAULT_USE_TOOLS = os.getenv("USE_TOOLS", "false").lower() in ("true", "1", "yes")
+DEFAULT_ENABLE_MEMORY_MONITOR = os.getenv("ENABLE_MEMORY_MONITOR", "true").lower() in ("true", "1", "yes")
+DEFAULT_MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
+DEFAULT_AUTO_CALIBRATE = os.getenv("AUTO_CALIBRATE", "true").lower() in ("true", "1", "yes")
+DEFAULT_CALIBRATION_SECONDS = float(os.getenv("CALIBRATION_SECONDS", "2.0"))
+
+# VAD (Voice Activity Detection) configuration
+DEFAULT_USE_VAD = os.getenv("USE_VAD", "true").lower() in ("true", "1", "yes")
+DEFAULT_FIXED_LISTEN_SECONDS = float(os.getenv("FIXED_LISTEN_SECONDS", "5.0"))
+DEFAULT_VAD_SAMPLE_RATE = int(os.getenv("VAD_SAMPLE_RATE", "16000"))
+DEFAULT_VAD_FRAME_DURATION_MS = int(os.getenv("VAD_FRAME_DURATION_MS", "30"))
+DEFAULT_VAD_PADDING_DURATION_MS = int(os.getenv("VAD_PADDING_DURATION_MS", "360"))
+DEFAULT_VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
+DEFAULT_VAD_ACTIVATION_RATIO = float(os.getenv("VAD_ACTIVATION_RATIO", "0.6"))
+DEFAULT_VAD_DEACTIVATION_RATIO = float(os.getenv("VAD_DEACTIVATION_RATIO", "0.85"))
 
 
 # =============================================================================
@@ -363,6 +493,264 @@ def _get_default_compute_type(device: str) -> str:
     if _is_jetson():
         return "int8"  # Jetson Orin Nano works best with int8
     return "float16"  # Desktop GPUs (RTX series) use float16
+
+
+# =============================================================================
+# Pipeline Decision Helpers
+# =============================================================================
+
+# Minimum audio bytes for valid speech (1 second at 16kHz, 16-bit)
+MIN_AUDIO_BYTES = 32000
+
+
+def is_audio_too_short(raw_bytes: bytes, min_bytes: int = MIN_AUDIO_BYTES) -> bool:
+    """Check if audio segment is too short to be valid speech.
+    
+    Args:
+        raw_bytes: Raw audio bytes
+        min_bytes: Minimum bytes threshold (default: 1 second at 16kHz)
+        
+    Returns:
+        True if audio is too short and should be rejected
+    """
+    return len(raw_bytes) < min_bytes
+
+
+def is_wakeword_echo(recognized_text: str, wakeword_phrases: list[str] = None) -> bool:
+    """Check if recognized text is just the wake word (not a real command).
+    
+    Args:
+        recognized_text: Text recognized from speech
+        wakeword_phrases: List of wake word phrases to filter
+        
+    Returns:
+        True if text is a wake word echo and should be ignored
+    """
+    if wakeword_phrases is None:
+        wakeword_phrases = ["hey jarvis", "jarvis", "hey jarvis."]
+    
+    normalized = recognized_text.strip().lower()
+    return normalized in wakeword_phrases
+
+
+def is_self_echo(user_text: str, bot_response: str) -> bool:
+    """Check if user speech is an echo of the bot's last response.
+    
+    This happens when the bot's TTS output is picked up by the microphone.
+    
+    Args:
+        user_text: Text recognized from user speech
+        bot_response: Last bot response text
+        
+    Returns:
+        True if user text appears to be an echo of bot response
+    """
+    if not user_text or not bot_response:
+        return False
+    
+    normalized_user = user_text.strip().lower()
+    normalized_bot = bot_response.strip().lower()
+    
+    if not normalized_user or not normalized_bot:
+        return False
+    
+    return (
+        normalized_user == normalized_bot
+        or normalized_user in normalized_bot
+        or normalized_bot in normalized_user
+    )
+
+
+# =============================================================================
+# Audio Calibration Helpers
+# =============================================================================
+
+def compute_noise_rms(audio_bytes: bytes) -> float:
+    """Compute RMS (root mean square) of audio samples.
+    
+    Args:
+        audio_bytes: Raw audio bytes in int16 format
+        
+    Returns:
+        RMS value as float (0 for silence/empty input)
+    """
+    import numpy as np
+    
+    if not audio_bytes:
+        return 0.0
+    
+    samples = np.frombuffer(audio_bytes, dtype=np.int16)
+    if len(samples) == 0:
+        return 0.0
+    
+    # Compute RMS
+    rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
+    return float(rms)
+
+
+def compute_noise_dbfs(audio_bytes: bytes) -> float:
+    """Compute dBFS (decibels relative to full scale) of audio samples.
+    
+    Args:
+        audio_bytes: Raw audio bytes in int16 format
+        
+    Returns:
+        dBFS value (0 = full scale, negative values = quieter)
+    """
+    import math
+    
+    rms = compute_noise_rms(audio_bytes)
+    if rms <= 0:
+        return -100.0  # Return very low value for silence
+    
+    # Full scale for int16 is 32767
+    full_scale = 32767.0
+    dbfs = 20 * math.log10(rms / full_scale)
+    return dbfs
+
+
+def compute_recommended_vad_aggressiveness(noise_dbfs: float) -> int:
+    """Determine recommended VAD aggressiveness based on ambient noise level.
+    
+    Args:
+        noise_dbfs: Ambient noise level in dBFS
+        
+    Returns:
+        VAD aggressiveness level 0-3 (higher = more strict noise filtering)
+    """
+    # Thresholds determined empirically:
+    # Very quiet (< -45 dBFS): Use low aggressiveness (more sensitive to speech)
+    # Quiet (-45 to -35 dBFS): Use moderate-low aggressiveness
+    # Moderate (-35 to -25 dBFS): Use moderate aggressiveness
+    # Loud (> -25 dBFS): Use high aggressiveness (stricter filtering)
+    
+    if noise_dbfs < -45:
+        return 1  # Quiet room - be more sensitive
+    elif noise_dbfs < -35:
+        return 2  # Normal room
+    elif noise_dbfs < -25:
+        return 2  # Moderate noise
+    else:
+        return 3  # Loud environment - be more strict
+
+
+def compute_wakeword_threshold_boost(noise_dbfs: float) -> float:
+    """Compute threshold boost for wakeword detection based on noise level.
+    
+    In noisier environments, we want to increase the threshold to reduce
+    false positives. The boost is always >= 0 (never makes threshold more sensitive).
+    
+    Args:
+        noise_dbfs: Ambient noise level in dBFS
+        
+    Returns:
+        Threshold boost (0.0 to 0.3)
+    """
+    # Map noise level to boost:
+    # Very quiet (< -45 dBFS): No boost needed
+    # Quiet (-45 to -35 dBFS): Tiny boost (0.0-0.05)
+    # Moderate (-35 to -25 dBFS): Small boost (0.05-0.15)
+    # Loud (> -25 dBFS): Larger boost (0.15-0.3)
+    
+    if noise_dbfs < -45:
+        return 0.0
+    elif noise_dbfs < -35:
+        # Linear interpolation from 0 to 0.05
+        factor = (noise_dbfs + 45) / 10  # 0 to 1
+        return 0.05 * factor
+    elif noise_dbfs < -25:
+        # Linear interpolation from 0.05 to 0.15
+        factor = (noise_dbfs + 35) / 10  # 0 to 1
+        return 0.05 + 0.10 * factor
+    else:
+        # Linear interpolation from 0.15 to 0.3, capped at 0.3
+        factor = min((noise_dbfs + 25) / 10, 1.0)  # 0 to 1, capped
+        return min(0.15 + 0.15 * factor, 0.3)
+
+
+def calibrate_audio_parameters(
+    sample_seconds: float = 2.0,
+    base_wakeword_threshold: float = 0.5,
+    sample_rate: int = 16000,
+    device_index: Optional[int] = None,
+) -> dict[str, Any]:
+    """Measure ambient noise and compute recommended audio parameters.
+    
+    This function samples audio for a short period at startup to measure
+    the background noise level, then computes recommended values for:
+    - VAD aggressiveness (0-3)
+    - Wakeword detection threshold
+    
+    Args:
+        sample_seconds: How long to sample ambient noise (default 2 seconds)
+        base_wakeword_threshold: Base wakeword threshold to boost from
+        sample_rate: Audio sample rate in Hz
+        device_index: PyAudio input device index (None = default)
+        
+    Returns:
+        Dict with keys: vad_aggressiveness, wakeword_threshold, noise_dbfs, success
+    """
+    import pyaudio
+    
+    # Default values if calibration fails
+    defaults = {
+        'vad_aggressiveness': 3,  # Conservative default
+        'wakeword_threshold': base_wakeword_threshold,
+        'noise_dbfs': -40.0,
+        'success': False,
+    }
+    
+    try:
+        pa = pyaudio.PyAudio()
+        
+        try:
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=1024,
+            )
+            
+            # Collect audio samples
+            total_samples = int(sample_rate * sample_seconds)
+            chunk_size = 1024
+            chunks = []
+            
+            samples_read = 0
+            while samples_read < total_samples:
+                chunk = stream.read(min(chunk_size, total_samples - samples_read), exception_on_overflow=False)
+                chunks.append(chunk)
+                samples_read += chunk_size
+            
+            stream.stop_stream()
+            stream.close()
+            
+            # Combine all audio
+            audio_bytes = b''.join(chunks)
+            
+            # Compute noise metrics
+            noise_dbfs = compute_noise_dbfs(audio_bytes)
+            
+            # Compute recommended parameters
+            vad_aggressiveness = compute_recommended_vad_aggressiveness(noise_dbfs)
+            threshold_boost = compute_wakeword_threshold_boost(noise_dbfs)
+            wakeword_threshold = min(base_wakeword_threshold + threshold_boost, 0.95)
+            
+            return {
+                'vad_aggressiveness': vad_aggressiveness,
+                'wakeword_threshold': wakeword_threshold,
+                'noise_dbfs': noise_dbfs,
+                'success': True,
+            }
+            
+        finally:
+            pa.terminate()
+            
+    except Exception as e:
+        logger.warning(f"Audio calibration failed: {e}")
+        return defaults
 
 
 # =============================================================================
@@ -1036,8 +1424,20 @@ def main(
     tts_speed: float = 1.0,
     voice: Optional[str] = None,
     vibevoice_speaker: Optional[str] = None,
+    auto_calibrate: bool = True,
+    calibration_seconds: float = 2.0,
+    use_vad: bool = True,
+    fixed_listen_seconds: float = 5.0,
 ) -> None:
     """Main entry point for the voice assistant.
+
+    Runtime overview:
+    - Validates/repairs default audio devices (best-effort).
+    - Optionally calibrates ambient noise to adjust VAD aggressiveness and wake word threshold.
+    - Builds a listener (VAD or fixed-time) and wires callbacks:
+      - Speech callback runs STT → LLM (optional tools) → TTS playback.
+    - In wake word mode, the wake word detector runs continuously and starts the listener only
+      after the wake word triggers.
 
     Args:
         use_wakeword: Enable wake word detection instead of continuous listening
@@ -1055,7 +1455,36 @@ def main(
         tts_speed: Speech speed for Kokoro TTS
         voice: Voice character name for Chatterbox (loads voice and persona automatically)
         vibevoice_speaker: Speaker name for VibeVoice TTS (default: Carter)
+        auto_calibrate: Enable automatic noise calibration at startup
+        calibration_seconds: Duration of noise sampling for calibration
+        use_vad: Use VAD for speech detection (False = fixed-time recording)
+        fixed_listen_seconds: Recording duration when VAD is disabled
     """
+    # -------------------------------------------------------------------------
+    # Audio Device Validation
+    # -------------------------------------------------------------------------
+    # Audio defaults drift on many Linux systems (reboots, USB hotplug, etc.). We validate that
+    # the configured input/output devices exist and (if needed) try to select a reasonable USB
+    # mic/speaker automatically. For interactive setup use: `./set_audio_defaults.sh`.
+    from audio.audio_devices import ensure_correct_audio_devices, validate_audio_setup
+    
+    print("-> Checking audio configuration...")
+    audio_status = validate_audio_setup()
+    
+    if not audio_status["all_ok"]:
+        if audio_status["issues"]:
+            for issue in audio_status["issues"]:
+                print(f"   ⚠️  {issue}")
+        
+        # Attempt to fix automatically
+        if ensure_correct_audio_devices(verbose=True):
+            print("   ✓ Audio devices corrected automatically")
+        else:
+            print("   ⚠️  Could not configure audio devices automatically")
+            print("   Run ./set_audio_defaults.sh to configure audio")
+    else:
+        print("   ✓ Audio devices configured correctly")
+    
     # Log configuration at debug level
     logger.debug("=" * 60)
     logger.debug("Starting SocialRobot Voice Assistant")
@@ -1082,7 +1511,7 @@ def main(
     
     print(f"-> Initializing voice assistant ({mode_str})...")
     
-    # Print configuration and validate
+    # Instantiate and validate the selected LLM backend.
     if llm_backend == "ollama":
         model_to_use = OLLAMA_MODEL_TOOLS if use_tools else OLLAMA_MODEL
         print(f"-> Ollama URL: {OLLAMA_URL}")
@@ -1105,7 +1534,7 @@ def main(
         print(f"-> Firecrawl URL: {FIRECRAWL_URL}")
         print(f"-> Weather API: {'✓ Configured' if OPENWEATHERMAP_API_KEY else '✗ Not configured'}")
         
-        # Check Firecrawl connectivity
+        # Firecrawl is required for web search/scrape tools; warn early if unreachable.
         try:
             response = requests.get(f"{FIRECRAWL_URL}/", timeout=5)
             if response.status_code == 200:
@@ -1141,19 +1570,48 @@ def main(
         )
         memory_thread.start()
     
-    # VAD configuration
-    # aggressiveness: 0=least aggressive (sensitive), 3=most aggressive (filters noise better)
+    # Automatic noise calibration:
+    # Measures ambient noise briefly at startup and tunes parameters to reduce false triggers in
+    # noisy environments while staying responsive in quiet rooms.
+    calibrated_vad_aggressiveness = DEFAULT_VAD_AGGRESSIVENESS
+    calibrated_wakeword_threshold = wakeword_threshold  # Use provided threshold as base
+    
+    if auto_calibrate:
+        print(f"-> Calibrating audio parameters ({calibration_seconds:.1f}s)...")
+        calibration_result = calibrate_audio_parameters(
+            sample_seconds=calibration_seconds,
+            base_wakeword_threshold=wakeword_threshold,
+        )
+        
+        if calibration_result['success']:
+            calibrated_vad_aggressiveness = calibration_result['vad_aggressiveness']
+            calibrated_wakeword_threshold = calibration_result['wakeword_threshold']
+            noise_dbfs = calibration_result['noise_dbfs']
+            
+            print(f"-> Calibration complete: noise={noise_dbfs:.1f} dBFS")
+            print(f"   VAD aggressiveness: {calibrated_vad_aggressiveness} (0=sensitive, 3=strict)")
+            if use_wakeword:
+                print(f"   Wakeword threshold: {calibrated_wakeword_threshold:.2f} (base: {wakeword_threshold:.2f})")
+        else:
+            print(f"-> Calibration failed, using defaults")
+    else:
+        print(f"-> Auto-calibration disabled, using default parameters")
+    
+    # VAD configuration. Calibration only overrides aggressiveness; other values remain sourced
+    # from `.env` defaults.
     vad_config = VADConfig(
-        sample_rate=16000,
-        frame_duration_ms=30,
-        padding_duration_ms=360,
-        aggressiveness=3  # Maximum noise filtering
+        sample_rate=DEFAULT_VAD_SAMPLE_RATE,
+        frame_duration_ms=DEFAULT_VAD_FRAME_DURATION_MS,
+        padding_duration_ms=DEFAULT_VAD_PADDING_DURATION_MS,
+        aggressiveness=calibrated_vad_aggressiveness,  # May be overridden by calibration
+        activation_ratio=DEFAULT_VAD_ACTIVATION_RATIO,
+        deactivation_ratio=DEFAULT_VAD_DEACTIVATION_RATIO,
     )
     
-    # Device detection for STT
+    # STT device selection: if the caller didn't specify `--device`, pick CUDA when available.
     stt_device = device if device else _detect_whisper_device()
     
-    # Initialize STT model using the factory
+    # Initialize STT engine. If GPU init fails (often cuDNN/CUDA issues), fall back to CPU.
     print(f"-> STT Engine: {stt_engine.upper()}")
     try:
         stt_model = create_stt_engine(
@@ -1178,7 +1636,8 @@ def main(
         else:
             raise
     
-    # Resolve voice paths for Chatterbox TTS
+    # Resolve voice + persona assets for Chatterbox.
+    # `--voice <name>` maps to `voices/<name>.wav` + `personas/<name>.txt` when present.
     voice_path = None
     persona_path = None
     if voice:
@@ -1198,17 +1657,17 @@ def main(
             print(f"-> Warning: Persona file not found: {persona_path}")
             persona_path = None
     
-    # Initialize LLM client with optional persona
+    # Build the system prompt (optionally persona-based) and create an LLM client.
     system_prompt = get_system_prompt(use_tools, persona_path=persona_path)
     llm_client = create_llm_client(llm_backend, use_tools, system_prompt)
     
-    # Load tools if enabled
+    # Load tool schemas (OpenAI-style function/tool definitions) when `--tools` is enabled.
     tools = []
     if use_tools:
         from tools import TOOLS
         tools = TOOLS
     
-    # Initialize TTS engine
+    # Initialize TTS engine. Engine-specific kwargs are routed through `audio/engine_config.py`.
     tts_kwargs = {"use_gpu": tts_use_gpu}
     if tts_engine == "kokoro":
         tts_kwargs["voice"] = tts_voice or "af_bella"
@@ -1219,7 +1678,9 @@ def main(
         tts_kwargs["speaker"] = vibevoice_speaker or "Carter"
     tts_model = create_tts_engine(engine=tts_engine, **tts_kwargs)
     
-    # State variables
+    # Runtime state:
+    # - `last_bot_response` supports simple echo suppression (mic picks up speaker output).
+    # - In wake word mode, `listening_active` prevents re-entrancy while a command is being handled.
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
     listening_active = threading.Event() if use_wakeword else None
@@ -1236,13 +1697,10 @@ def main(
             return
         
         # Filter out very short audio segments (likely noise)
-        # At 16kHz, 16-bit audio: 32000 bytes = 1 second
-        # Require at least 1 second of audio for valid speech
-        MIN_AUDIO_BYTES = 32000  # ~1 second minimum
-        audio_duration_ms = (len(raw_bytes) / 32) # 16kHz * 2 bytes = 32 bytes/ms
+        audio_duration_ms = (len(raw_bytes) / 32)  # 16kHz * 2 bytes = 32 bytes/ms
         logger.debug(f"Audio duration: {audio_duration_ms:.0f}ms ({len(raw_bytes)} bytes)")
         
-        if len(raw_bytes) < MIN_AUDIO_BYTES:
+        if is_audio_too_short(raw_bytes):
             logger.info(f"Ignoring short audio: {audio_duration_ms:.0f}ms < 1000ms minimum")
             print(f"-> Ignoring short audio segment ({len(raw_bytes)} bytes < {MIN_AUDIO_BYTES} min)")
             # Resume listening without processing
@@ -1275,7 +1733,8 @@ def main(
         
         print("-> User said:", recognized_text)
         
-        # Helper to return to listening state
+        # Helper to return to listening state. In wake word mode we stop the short-lived command
+        # listener and resume wake word detection; in continuous mode we simply re-enable VAD.
         def resume_listening():
             if use_wakeword:
                 vad_listener.stop()
@@ -1289,27 +1748,17 @@ def main(
             resume_listening()
             return
         
-        normalized_user = recognized_text.strip().lower()
-        
         # Filter wake word echoes (when using wake word mode)
-        if use_wakeword:
-            wake_word_phrases = ["hey jarvis", "jarvis", "hey jarvis."]
-            if normalized_user in wake_word_phrases:
-                print("-> Ignoring wake word echo, waiting for actual command...")
-                resume_listening()
-                return
+        if use_wakeword and is_wakeword_echo(recognized_text):
+            print("-> Ignoring wake word echo, waiting for actual command...")
+            resume_listening()
+            return
         
         # Echo cancellation: ignore if user speech matches last bot response
-        normalized_bot = last_bot_response.strip().lower()
-        if normalized_user and normalized_bot:
-            if (
-                normalized_user == normalized_bot
-                or normalized_user in normalized_bot
-                or normalized_bot in normalized_user
-            ):
-                print("-> Ignoring self-echo from recent response.")
-                resume_listening()
-                return
+        if is_self_echo(recognized_text, last_bot_response):
+            print("-> Ignoring self-echo from recent response.")
+            resume_listening()
+            return
         
         # Query LLM
         logger.debug(f"Sending query to LLM: '{recognized_text[:100]}...' (tools={use_tools})")
@@ -1355,7 +1804,8 @@ def main(
             process_mem = _get_process_memory()
             print(f"-> {_format_memory_stats(stats, process_mem)}")
         
-        # Return to listening state
+        # Return to listening state.
+        # Wake word mode uses a longer cooldown to reduce immediate self-triggering from TTS audio.
         logger.debug("Returning to listening state")
         if use_wakeword:
             vad_listener.stop()
@@ -1367,7 +1817,7 @@ def main(
             vad_listener.enable_vad()
             logger.debug("VAD re-enabled")
     
-    # Wake word mode: define callback for when wake word is detected
+    # Wake word callback: pauses the detector, then starts a listener to capture one command.
     def on_wakeword_detected() -> None:
         nonlocal vad_listener, wakeword_detector
         
@@ -1380,18 +1830,27 @@ def main(
         print("-> Listening for command...")
         time.sleep(0.5)  # Let wake word audio clear
         
-        vad_listener = VADListener(
-            config=vad_config,
-            device_index=None,
-            on_speech_callback=on_speech_detected
-        )
+        # Create listener based on VAD setting
+        if use_vad:
+            vad_listener = VADListener(
+                config=vad_config,
+                device_index=None,
+                on_speech_callback=on_speech_detected
+            )
+        else:
+            vad_listener = FixedTimeListener(
+                listen_seconds=fixed_listen_seconds,
+                sample_rate=DEFAULT_VAD_SAMPLE_RATE,
+                device_index=None,
+                on_speech_callback=on_speech_detected
+            )
         vad_listener.start()
     
     # Start the main loop based on mode
     if use_wakeword:
         wakeword_detector = WakeWordDetector(
             wakeword_models=[WAKEWORD_MODEL],
-            threshold=wakeword_threshold,
+            threshold=calibrated_wakeword_threshold,
             chunk_size=1280,
             sample_rate=16000,
             device_index=None,
@@ -1400,12 +1859,22 @@ def main(
         
         print("-> Voice assistant ready with wake word detection!")
     else:
-        vad_listener = VADListener(
-            config=vad_config,
-            device_index=None,
-            on_speech_callback=on_speech_detected
-        )
-        print("-> Voice assistant ready! Listening for speech...")
+        # Create listener based on VAD setting
+        if use_vad:
+            vad_listener = VADListener(
+                config=vad_config,
+                device_index=None,
+                on_speech_callback=on_speech_detected
+            )
+            print("-> Voice assistant ready! Listening with VAD...")
+        else:
+            vad_listener = FixedTimeListener(
+                listen_seconds=fixed_listen_seconds,
+                sample_rate=DEFAULT_VAD_SAMPLE_RATE,
+                device_index=None,
+                on_speech_callback=on_speech_detected
+            )
+            print(f"-> Voice assistant ready! Fixed {fixed_listen_seconds}s recording mode...")
     
     if use_tools:
         print("-> 🌐 Internet access enabled via Firecrawl tools")
@@ -1511,21 +1980,23 @@ Equivalent to old scripts:
     parser.add_argument(
         "--wakeword",
         action="store_true",
-        help="Enable wake word detection (default: continuous listening mode)",
+        default=DEFAULT_USE_WAKEWORD,
+        help=f"Enable wake word detection (default: {DEFAULT_USE_WAKEWORD})",
     )
     
     parser.add_argument(
         "--llm",
         type=str,
         choices=["ollama", "litellm"],
-        default="ollama",
-        help="LLM backend: 'ollama' for local, 'litellm' for online API (default: ollama)",
+        default=DEFAULT_LLM_BACKEND,
+        help=f"LLM backend: 'ollama' for local, 'litellm' for online API (default: {DEFAULT_LLM_BACKEND})",
     )
     
     parser.add_argument(
         "--tools",
         action="store_true",
-        help="Enable internet tools: web search, URL scraping, weather",
+        default=DEFAULT_USE_TOOLS,
+        help=f"Enable internet tools: web search, URL scraping, weather (default: {DEFAULT_USE_TOOLS})",
     )
     
     # STT options
@@ -1533,9 +2004,9 @@ Equivalent to old scripts:
         "--stt-engine",
         type=str,
         choices=["faster-whisper", "openai-whisper"],
-        default="faster-whisper",
-        help="STT engine: 'faster-whisper' (ctranslate2, needs cuDNN for GPU) or "
-             "'openai-whisper' (PyTorch, better GPU compatibility). Default: faster-whisper",
+        default=DEFAULT_STT_ENGINE,
+        help=f"STT engine: 'faster-whisper' (ctranslate2, needs cuDNN for GPU) or "
+             f"'openai-whisper' (PyTorch, better GPU compatibility). Default: {DEFAULT_STT_ENGINE}",
     )
     
     parser.add_argument(
@@ -1567,14 +2038,15 @@ Equivalent to old scripts:
         "--tts-engine",
         type=str,
         choices=["kokoro", "piper", "chatterbox", "vibevoice"],
-        default="kokoro",
-        help="TTS engine to use (default: kokoro)",
+        default=DEFAULT_TTS_ENGINE,
+        help=f"TTS engine to use (default: {DEFAULT_TTS_ENGINE})",
     )
     
     parser.add_argument(
         "--tts-gpu",
         action="store_true",
-        help="Enable GPU acceleration for TTS",
+        default=DEFAULT_TTS_GPU,
+        help=f"Enable GPU acceleration for TTS (default: {DEFAULT_TTS_GPU})",
     )
     
     parser.add_argument(
@@ -1594,7 +2066,7 @@ Equivalent to old scripts:
     parser.add_argument(
         "--voice",
         type=str,
-        default=None,
+        default=DEFAULT_TTS_VOICE,
         help="Voice character name for Chatterbox TTS (e.g., rick_sanchez, morgan_freeman). "
              "Auto-loads voice WAV from voices/ and persona from personas/",
     )
@@ -1611,14 +2083,45 @@ Equivalent to old scripts:
     parser.add_argument(
         "--no-memory-monitor",
         action="store_true",
-        help="Disable memory usage monitoring",
+        default=not DEFAULT_ENABLE_MEMORY_MONITOR,
+        help=f"Disable memory usage monitoring (default monitoring: {DEFAULT_ENABLE_MEMORY_MONITOR})",
     )
     
     parser.add_argument(
         "--monitor-interval",
         type=int,
-        default=60,
-        help="Memory monitor update interval in seconds (default: 60)",
+        default=DEFAULT_MONITOR_INTERVAL,
+        help=f"Memory monitor update interval in seconds (default: {DEFAULT_MONITOR_INTERVAL})",
+    )
+    
+    # Calibration options
+    parser.add_argument(
+        "--no-auto-calibrate",
+        action="store_true",
+        default=not DEFAULT_AUTO_CALIBRATE,
+        help=f"Disable automatic noise calibration at startup (default calibration: {DEFAULT_AUTO_CALIBRATE})",
+    )
+    
+    parser.add_argument(
+        "--calibration-seconds",
+        type=float,
+        default=DEFAULT_CALIBRATION_SECONDS,
+        help=f"Duration of ambient noise sampling for calibration in seconds (default: {DEFAULT_CALIBRATION_SECONDS})",
+    )
+    
+    # VAD options
+    parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        default=not DEFAULT_USE_VAD,
+        help=f"Disable VAD, use fixed-time recording instead (default VAD: {DEFAULT_USE_VAD})",
+    )
+    
+    parser.add_argument(
+        "--fixed-listen-seconds",
+        type=float,
+        default=DEFAULT_FIXED_LISTEN_SECONDS,
+        help=f"Recording duration in seconds when VAD is disabled (default: {DEFAULT_FIXED_LISTEN_SECONDS})",
     )
     
     parser.add_argument(
@@ -1648,5 +2151,8 @@ Equivalent to old scripts:
         tts_speed=args.tts_speed,
         voice=args.voice,
         vibevoice_speaker=args.vibevoice_speaker,
+        auto_calibrate=not args.no_auto_calibrate,
+        calibration_seconds=args.calibration_seconds,
+        use_vad=not args.no_vad,
+        fixed_listen_seconds=args.fixed_listen_seconds,
     )
-

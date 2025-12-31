@@ -2,15 +2,73 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import os
 import re
+import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Callable, List, Optional
 
 import numpy as np
-import pyaudio
+from audio.suppress_warnings import get_pyaudio, suppress_stderr
+pyaudio = get_pyaudio()
+
+
+@contextlib.contextmanager
+def suppress_chatterbox_logs():
+    """Suppress verbose Chatterbox/torch logs and progress bars."""
+    # Suppress warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        
+        # Suppress root logger warnings
+        root_logger = logging.getLogger()
+        old_level = root_logger.level
+        root_logger.setLevel(logging.ERROR)
+        
+        # Suppress specific loggers
+        loggers_to_suppress = [
+            'chatterbox', 'diffusers', 'transformers', 'torch',
+            'torchaudio', 'huggingface_hub', 'filelock'
+        ]
+        old_levels = {}
+        for name in loggers_to_suppress:
+            logger = logging.getLogger(name)
+            old_levels[name] = logger.level
+            logger.setLevel(logging.ERROR)
+        
+        # Disable tqdm progress bars globally
+        try:
+            import tqdm
+            old_tqdm_disable = getattr(tqdm.tqdm, '__init__', None)
+            tqdm.tqdm.__init__.__globals__['disable'] = True
+        except:
+            pass
+        
+        # Capture stdout/stderr to suppress Chatterbox prints
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        
+        try:
+            yield
+        finally:
+            # Restore stdout/stderr
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            
+            # Restore loggers
+            root_logger.setLevel(old_level)
+            for name, level in old_levels.items():
+                logging.getLogger(name).setLevel(level)
 
 
 class ChatterboxTTS:
@@ -60,14 +118,15 @@ class ChatterboxTTS:
 
         # Try to import Chatterbox (turbo or standard model)
         try:
-            if self.use_turbo:
-                from chatterbox.tts_turbo import ChatterboxTurboTTS as ChatterboxModel
-                print("-> Chatterbox Turbo TTS library loaded successfully")
-            else:
-                from chatterbox.tts import ChatterboxTTS as ChatterboxModel
-                print("-> Chatterbox TTS library loaded successfully")
-            import torch
-            import torchaudio
+            with suppress_chatterbox_logs():
+                if self.use_turbo:
+                    from chatterbox.tts_turbo import ChatterboxTurboTTS as ChatterboxModel
+                else:
+                    from chatterbox.tts import ChatterboxTTS as ChatterboxModel
+                import torch
+                import torchaudio
+            model_type = "Turbo" if self.use_turbo else "Standard"
+            print(f"-> Chatterbox {model_type} TTS library loaded")
             self._ChatterboxModel = ChatterboxModel
             self._torchaudio = torchaudio
             self._torch = torch
@@ -151,9 +210,9 @@ class ChatterboxTTS:
             self._torch.tensor = float32_tensor
 
             try:
-                self._model.prepare_conditionals(voice_file)
+                with suppress_chatterbox_logs():
+                    self._model.prepare_conditionals(voice_file)
                 self._voice_prepared = True
-                print(f"-> Voice conditionals prepared successfully")
             finally:
                 # Restore original functions
                 librosa.load = original_librosa_load
@@ -171,13 +230,30 @@ class ChatterboxTTS:
             return
 
         model_type = "Turbo" if self.use_turbo else "Standard"
-        print(f"-> Loading Chatterbox {model_type} TTS model on device: {self.device}")
+        print(f"-> Loading Chatterbox {model_type} TTS model on {self.device.upper()}...", end="", flush=True)
+        load_start = time.time()
         try:
-            self._model = self._ChatterboxModel.from_pretrained(device=self.device)
+            # Workaround for cuDNN sublibrary version mismatch on newer GPUs (e.g. RTX 50 series)
+            # The error occurs in RNN flatten_parameters() when cuDNN versions don't match.
+            # Temporarily disable cuDNN for RNN operations during model loading.
+            with suppress_chatterbox_logs():
+                if self.device == "cuda" and self._torch.cuda.is_available():
+                    original_cudnn_enabled = self._torch.backends.cudnn.enabled
+                    try:
+                        # Disable cuDNN to avoid CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH
+                        self._torch.backends.cudnn.enabled = False
+                        self._model = self._ChatterboxModel.from_pretrained(device=self.device)
+                    finally:
+                        # Re-enable cuDNN for other operations (convolutions benefit from it)
+                        self._torch.backends.cudnn.enabled = original_cudnn_enabled
+                else:
+                    self._model = self._ChatterboxModel.from_pretrained(device=self.device)
+            
             self.sample_rate = self._model.sr
+            load_time = time.time() - load_start
 
-            voice_info = f" with voice: {self.voice_path}" if self.voice_path else " (default voice)"
-            print(f"-> Using Chatterbox {model_type} TTS for speech synthesis on {self.device.upper()}{voice_info}.")
+            voice_info = f" with voice: {Path(self.voice_path).name}" if self.voice_path else ""
+            print(f" done ({load_time:.1f}s){voice_info}")
 
             # Pre-compute voice conditionals if voice file provided
             if self.voice_path:
@@ -255,14 +331,15 @@ class ChatterboxTTS:
             try:
                 # Generate audio with or without voice cloning
                 # If conditionals are pre-computed, don't pass audio_prompt_path
-                if self._voice_prepared:
-                    wav_tensor = self._model.generate(chunk)
-                elif self.voice_path:
-                    # Fallback to file path (may have dtype issues)
-                    voice_file = self._temp_voice_path or self.voice_path
-                    wav_tensor = self._model.generate(chunk, audio_prompt_path=voice_file)
-                else:
-                    wav_tensor = self._model.generate(chunk)
+                with suppress_chatterbox_logs():
+                    if self._voice_prepared:
+                        wav_tensor = self._model.generate(chunk)
+                    elif self.voice_path:
+                        # Fallback to file path (may have dtype issues)
+                        voice_file = self._temp_voice_path or self.voice_path
+                        wav_tensor = self._model.generate(chunk, audio_prompt_path=voice_file)
+                    else:
+                        wav_tensor = self._model.generate(chunk)
                 
                 # Convert torch tensor to numpy array
                 # wav_tensor shape is typically (1, num_samples) or (num_samples,)

@@ -12,14 +12,34 @@ echo ""
 
 # Check if virtual environment is activated
 if [[ -z "$VIRTUAL_ENV" ]]; then
-    echo "⚠️  Warning: No virtual environment detected!"
-    echo "   Please activate your virtual environment first:"
-    echo "   source ~/robot/.venv/bin/activate"
-    echo ""
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+    # Try to find and activate a virtual environment
+    VENV_FOUND=false
+    
+    # Check common venv locations
+    for venv_path in ".venv" "venv" ".virtualenv" "env"; do
+        if [[ -f "$venv_path/bin/activate" ]]; then
+            echo "-> Found virtual environment at: $venv_path"
+            echo "-> Activating virtual environment..."
+            source "$venv_path/bin/activate"
+            VENV_FOUND=true
+            break
+        fi
+    done
+    
+    if [[ "$VENV_FOUND" == false ]]; then
+        echo "⚠️  Warning: No virtual environment detected!"
+        echo "   Please create a virtual environment first:"
+        echo "   python3 -m venv .venv"
+        echo "   source .venv/bin/activate"
+        echo ""
+        read -p "Continue anyway? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    else
+        echo "✓ Virtual environment activated"
+        echo ""
     fi
 fi
 

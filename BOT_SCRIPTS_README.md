@@ -12,17 +12,23 @@ These scripts allow you to easily start, stop, and check the status of your Soci
 
 ### Starting the Bot
 
-**Default (internet-connected with LiteLLM):**
+**Default:**
 ```bash
 ./start_bot.sh
 ```
 
 **Choose a specific variant:**
 ```bash
-./start_bot.sh wakeword                        # Basic (Ollama)
-./start_bot.sh wakeword_online                 # Basic (LiteLLM/OpenAI)
-./start_bot.sh wakeword_internetconnected      # With internet tools (Ollama)
-./start_bot.sh wakeword_internetconnected_online # With internet tools (LiteLLM/OpenAI)
+./start_bot.sh basic                 # Continuous listening (Ollama) [DEFAULT]
+./start_bot.sh wakeword              # Wake word activated (Ollama)
+./start_bot.sh wakeword_online       # Wake word activated (LiteLLM/OpenAI)
+./start_bot.sh tools                 # Continuous with internet tools (Ollama)
+./start_bot.sh wakeword_tools        # Wake word with internet tools (Ollama)
+./start_bot.sh wakeword_tools_online # Wake word with internet tools (LiteLLM/OpenAI)
+
+# Legacy names are still accepted:
+./start_bot.sh wakeword_internetconnected        # -> wakeword_tools
+./start_bot.sh wakeword_internetconnected_online # -> wakeword_tools_online
 ```
 
 **Pass additional arguments:**
@@ -91,12 +97,12 @@ tail -n 50 bot.log
 ### Example 1: Start with default settings
 ```bash
 ./start_bot.sh
-# Bot starts with wakeword_internetconnected_online variant
+# Bot starts with basic variant
 ```
 
 ### Example 2: Start with Piper TTS and custom settings
 ```bash
-./start_bot.sh wakeword_internetconnected_online --tts-engine piper --tts-gpu --wakeword-threshold 0.55
+./start_bot.sh wakeword_tools_online --tts-engine piper --tts-gpu --wakeword-threshold 0.55
 ```
 
 ### Example 3: Check if bot is running
@@ -121,7 +127,8 @@ tail -n 50 bot.log
 1. Check the logs: `cat bot.log`
 2. Make sure your `.env` file is configured
 3. Check if required services are running (Ollama, Firecrawl, etc.)
-4. Try running the script directly to see error messages: `python3 main_wakeword_internetconnected_online.py`
+4. Try running the equivalent command in the foreground to see error messages:
+   `python main.py --wakeword --llm litellm --tools`
 
 ### Bot is running but not responding
 1. Check the logs: `tail -f bot.log`
@@ -154,4 +161,3 @@ To automatically start the bot when your system boots, you can:
 3. **Using rc.local:** Add the start command to `/etc/rc.local`
 
 Let me know if you need help setting up autostart!
-

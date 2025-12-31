@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
-import pyaudio
+from audio.suppress_warnings import get_pyaudio, suppress_stderr
+pyaudio = get_pyaudio()
 import requests
 from kokoro_onnx import Kokoro, SAMPLE_RATE
 

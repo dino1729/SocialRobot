@@ -6,7 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Deque, Optional, Tuple
 
-import pyaudio
+from audio.suppress_warnings import get_pyaudio, suppress_stderr
+pyaudio = get_pyaudio()
 import webrtcvad
 
 
@@ -146,4 +147,86 @@ class VADListener:
         self._vad_enabled.clear()
 
 
-__all__ = ["VADListener", "VADConfig"]
+class FixedTimeListener:
+    """Captures audio for a fixed duration instead of using VAD.
+    
+    This is useful when VAD doesn't work well with certain audio setups
+    or when users prefer predictable recording durations.
+    """
+
+    def __init__(
+        self,
+        listen_seconds: float = 5.0,
+        sample_rate: int = 16000,
+        device_index: Optional[int] = None,
+        on_speech_callback: Optional[Callable[[bytes], None]] = None,
+    ) -> None:
+        self.listen_seconds = listen_seconds
+        self.sample_rate = sample_rate
+        self.device_index = device_index
+        self.on_speech_callback = on_speech_callback
+
+        self._pa = pyaudio.PyAudio()
+        self._stream = None
+        self._stop_flag = threading.Event()
+        self._listening_enabled = threading.Event()
+        self._listening_enabled.set()
+        
+        # Frame size for reading (same as VAD for consistency)
+        self.frame_duration_ms = 30
+        self.frame_size = int(self.sample_rate * self.frame_duration_ms / 1000)
+
+    def start(self) -> None:
+        """Start the fixed-time listening loop (blocking)."""
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.frame_size,
+            input_device_index=self.device_index,
+        )
+
+        print(f"-> Fixed-time listening started ({self.listen_seconds}s per segment).")
+
+        while not self._stop_flag.is_set():
+            if not self._listening_enabled.is_set():
+                time.sleep(0.1)
+                continue
+
+            # Capture audio for the fixed duration
+            print(f"-> Recording for {self.listen_seconds}s...")
+            frames = []
+            frames_needed = int(self.sample_rate * self.listen_seconds / self.frame_size)
+            
+            for _ in range(frames_needed):
+                if self._stop_flag.is_set() or not self._listening_enabled.is_set():
+                    break
+                frame = self._stream.read(self.frame_size, exception_on_overflow=False)
+                frames.append(frame)
+            
+            if frames and self._listening_enabled.is_set():
+                audio_data = b"".join(frames)
+                print(f"-> Captured {len(audio_data)} bytes of audio.")
+                
+                if self.on_speech_callback:
+                    self.on_speech_callback(audio_data)
+
+        self._stream.stop_stream()
+        self._stream.close()
+        self._pa.terminate()
+
+    def stop(self) -> None:
+        """Stop the listener."""
+        self._stop_flag.set()
+
+    def enable_vad(self) -> None:
+        """Enable listening (named for API compatibility with VADListener)."""
+        self._listening_enabled.set()
+
+    def disable_vad(self) -> None:
+        """Disable listening (named for API compatibility with VADListener)."""
+        self._listening_enabled.clear()
+
+
+__all__ = ["VADListener", "VADConfig", "FixedTimeListener"]

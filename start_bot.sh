@@ -148,17 +148,56 @@ else
         echo -e "${GREEN}✓ PulseAudio is running${NC}"
     fi
     
-    # Check audio devices
+    # Check audio devices against saved configuration
     CURRENT_SOURCE=$(pactl get-default-source 2>/dev/null)
     CURRENT_SINK=$(pactl get-default-sink 2>/dev/null)
     
+    # Load saved audio config if available
+    CONFIG_FILE="$SCRIPT_DIR/.audio_config"
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        
+        AUDIO_OK=true
+        
+        # Check microphone
+        if [ -n "$SAVED_SOURCE" ]; then
+            if [ "$CURRENT_SOURCE" != "$SAVED_SOURCE" ]; then
+                echo -e "${YELLOW}Correcting microphone setting...${NC}"
+                if pactl set-default-source "$SAVED_SOURCE" 2>/dev/null; then
+                    CURRENT_SOURCE="$SAVED_SOURCE"
+                    echo -e "${GREEN}  ✓ Microphone corrected${NC}"
+                else
+                    echo -e "${RED}  ✗ Failed to set microphone${NC}"
+                    AUDIO_OK=false
+                fi
+            fi
+        fi
+        
+        # Check speaker
+        if [ -n "$SAVED_SINK" ]; then
+            if [ "$CURRENT_SINK" != "$SAVED_SINK" ]; then
+                echo -e "${YELLOW}Correcting speaker setting...${NC}"
+                if pactl set-default-sink "$SAVED_SINK" 2>/dev/null; then
+                    CURRENT_SINK="$SAVED_SINK"
+                    echo -e "${GREEN}  ✓ Speaker corrected${NC}"
+                else
+                    echo -e "${RED}  ✗ Failed to set speaker${NC}"
+                    AUDIO_OK=false
+                fi
+            fi
+        fi
+        
+        if $AUDIO_OK; then
+            echo -e "${GREEN}✓ Audio devices configured from saved settings${NC}"
+        fi
+    fi
+    
     if [ -n "$CURRENT_SOURCE" ] && [ -n "$CURRENT_SINK" ]; then
-        echo -e "${GREEN}✓ Audio devices configured${NC}"
         echo -e "  Input:  ${CURRENT_SOURCE}"
         echo -e "  Output: ${CURRENT_SINK}"
     else
         echo -e "${YELLOW}Warning: Audio devices not properly configured${NC}"
-        echo -e "${YELLOW}Run ./check_audio_defaults.sh for details${NC}"
+        echo -e "${YELLOW}Run ./set_audio_defaults.sh to configure${NC}"
     fi
 fi
 echo ""

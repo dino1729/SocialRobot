@@ -1,92 +1,141 @@
 # Social Robot 🤖
 
-A lightweight, headless voice assistant powered by AI that listens, thinks, and responds—all running locally on an NVIDIA Jetson Orin Nano.
+A lightweight, headless voice assistant that listens, thinks, and responds. Designed to run locally (e.g., NVIDIA Jetson Orin Nano), with optional “online LLM” and optional internet tools.
 
-## What is it?
+## What It Does
 
-Talk to your robot and it talks back! This conversational AI assistant uses:
-- **Voice Activity Detection** (WebRTC-VAD) to hear when you're speaking
-- **Speech Recognition** (Faster-Whisper) to understand what you're saying
-- **Language Model** (Ollama with gemma3:270m) to generate intelligent responses
-- **Text-to-Speech** (Kokoro-ONNX) to speak back naturally
+- **VAD**: WebRTC VAD detects when you start/stop speaking.
+- **STT**: Faster-Whisper (default) or OpenAI Whisper (PyTorch).
+- **LLM**: Local Ollama (default) or online via LiteLLM-compatible endpoints.
+- **TTS**: Kokoro-ONNX (default) plus optional Piper / Chatterbox / VibeVoice.
 
-No cloud services required—everything runs locally in headless mode, perfect for SSH access and minimal setups.
+Everything is driven by a single entrypoint: `main.py` (feature flags are CLI options and/or `.env` defaults).
 
-## Available Modes
+## Modes & Examples
 
-| Mode | Script | Features |
-|------|--------|----------|
-| **Basic** | `main.py` | Continuous listening, offline, no internet |
-| **Internet** | `main_internetconnected.py` | Continuous listening, web search, weather tools |
-| **Wake Word** | `main_wakeword.py` | Wake word activation ("Hey Jarvis"), offline |
-| **Wake Word + Internet** | `main_wakeword_internetconnected.py` | Wake word activation with internet tools |
+Run continuous listening (local Ollama):
+```bash
+python main.py
+```
 
-See [WAKEWORD_GUIDE.md](WAKEWORD_GUIDE.md) for wake word setup and configuration.
+Wake word (“Hey Jarvis” by default):
+```bash
+python main.py --wakeword
+```
 
-## Quick Start
+Enable internet tools (web search/scrape + weather):
+```bash
+python main.py --tools
+```
 
-### 1. Install System Dependencies
+Full featured (wake word + online LLM + tools):
+```bash
+python main.py --wakeword --llm litellm --tools
+```
+
+TTS/STT examples:
+```bash
+python main.py --tts-engine piper --tts-gpu
+python main.py --tts-engine chatterbox --voice rick_sanchez --tts-gpu
+python main.py --stt-engine openai-whisper
+python main.py --device cpu --compute-type int8
+```
+
+## Setup
+
+### 1) System dependencies (Linux)
 ```bash
 sudo apt update
 sudo apt install -y git curl python3-venv python3-dev build-essential \
-    libportaudio2 portaudio19-dev libasound-dev
+  libportaudio2 portaudio19-dev libasound-dev
 ```
 
-### 2. Clone & Setup
+### 2) Python environment + install
+Python version is pinned in `.python-version`.
 ```bash
-git clone https://github.com/OminousIndustries/SocialRobot.git
-cd SocialRobot
-python3 -m venv ~/robot/.venv
-source ~/robot/.venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Install Ollama LLM
+Optional GPU / extra engines:
+```bash
+pip install -r requirements_gpu.txt
+```
+
+### 3) Configure `.env`
+```bash
+cp env.example .env
+```
+Edit keys as needed:
+- Local LLM: `OLLAMA_URL`, `OLLAMA_MODEL`
+- Online LLM: `LITELLM_URL`, `LITELLM_MODEL`, `LITELLM_API_KEY`
+- Tools: `FIRECRAWL_URL`, `FIRECRAWL_API_KEY`, `OPENWEATHERMAP_API_KEY`
+- Wake word: `WAKEWORD_MODEL`, `WAKEWORD_THRESHOLD`
+
+### 4) Ollama (local LLM)
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ollama run gemma3:270m
 ```
 
-### 4. Configure Audio
-Connect a USB microphone and speakers, then set your default audio devices:
-```bash
-pactl list short sinks    # find your output
-pactl set-default-sink <sink_name>
+## Audio Setup (PulseAudio / PipeWire)
 
-pactl list short sources  # find your input
+Quick path:
+```bash
+./set_audio_defaults.sh --auto
+./check_audio_defaults.sh
+```
+
+Manual path:
+```bash
+pactl list short sinks
+pactl set-default-sink <sink_name>
+pactl list short sources
 pactl set-default-source <source_name>
 ```
 
-### 5. Run!
+## Run in the Background
 
-**Option A: Continuous Listening (default)**
+Use the bot manager scripts (logs to `bot.log`, PID in `.bot.pid`):
 ```bash
-python main.py
+./start_bot.sh basic
+./start_bot.sh wakeword_tools_online --tts-engine piper --tts-gpu
+./status_bot.sh
+./stop_bot.sh
 ```
+See `BOT_SCRIPTS_README.md` for more examples.
 
-**Option B: Wake Word Activation (hands-free)**
+## Wake Word Setup
+
+Install and validate OpenWakeWord + models:
 ```bash
-python main_wakeword.py
+./setup_wakeword.sh
 ```
+Then run: `python main.py --wakeword` (tune `WAKEWORD_THRESHOLD` in `.env` if needed).
 
-Start talking—your robot is listening! 🎤
+## Tests
 
-> **💡 Wake Word Mode**: Say "Hey Jarvis" to activate the assistant, then speak your command. See [WAKEWORD_GUIDE.md](WAKEWORD_GUIDE.md) for details.
+Run all tests:
+```bash
+python -m pytest -q
+```
+Unit tests only:
+```bash
+python -m pytest -q tests/unit
+```
+Integration tests may require audio devices, GPU, or API keys (see `tests/integration/`).
+
+Manual smoke tests:
+- STT: `python test_stt.py`
+- TTS: `python test_tts.py`
+
+Benchmarks (optional):
+- `python benchmark_engines.py`
+- `python benchmark_tts_engines.py`
 
 ## Troubleshooting
 
-**First run taking forever?**  
-Models are downloading (Faster-Whisper, Kokoro, Ollama). Grab a coffee ☕
-
-**No audio devices found?**  
-Check that PulseAudio can see your hardware, and run as your desktop user (not root).
-
-**Want a different voice?**  
-Modify the `KokoroTTS` parameters in your code. List available voices with `KokoroTTS().available_voices()`.
-
-**Ollama not responding?**  
-Make sure the service is running: `ollama serve`
-
----
-
-Made with ❤️ for tinkerers, makers, and AI enthusiasts.
+- **GPU STT failures (cuDNN / CUDA issues)**: try `python main.py --device cpu` or switch engines with `--stt-engine openai-whisper`.
+- **No audio devices / wrong defaults**: run `./set_audio_defaults.sh --auto` and re-check with `./check_audio_defaults.sh`.
+- **Ollama not responding**: start it with `ollama serve`.
